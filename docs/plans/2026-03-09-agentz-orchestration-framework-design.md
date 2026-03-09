@@ -22,7 +22,7 @@ Agentz is an OpenCode plugin that enables multi-agent orchestration with dynamic
 ┌──────────────▼──────────────────────┐
 │  Layer 2: Skills (.md files)            │
 │  - Orchestrator skill                    │
-│  - 14 agent skills (2 leaf, 12 non-leaf) │
+│  - 15 agent skills (2 leaf, 13 non-leaf) │
 │  - Mapping table (task→tier+skill)       │
 └──────────────┬──────────────────────┘
                │ reads/writes
@@ -68,6 +68,8 @@ The orchestrator sees this table in its prompt as a reference frame. It follows 
 | engineer-devops | balanced | devops-engineer |
 | audit-security | powerful | security-auditor |
 | write-docs | balanced | technical-writer |
+| synthesize | balanced | synthesizer |
+| verify | balanced | backend-tester |
 
 ## 4. Agent Taxonomy
 
@@ -98,6 +100,7 @@ Non-leaf agents perform substantive work. They have direct tool access for simpl
 | `devops-engineer` | CI/CD, deployment, infrastructure |
 | `security-auditor` | Security review, vulnerability assessment |
 | `technical-writer` | Documentation, API docs, guides |
+| `synthesizer` | Reads all task outputs, identifies gaps/inconsistencies, consolidates review. Can add new todos, flag issues, or approve for verification. Adapts depth based on task complexity. |
 
 ## 5. Spawning Model
 
@@ -130,7 +133,23 @@ Orchestrator
 
 ## 6. Orchestrator Design
 
-The orchestrator is a **pure task processor**. It does NOT brainstorm or analyze business/technology concerns itself. Brainstorming is delegated to `business-analyst` as the first task.
+The orchestrator is the **main agent** — always active, injected into every conversation via the system prompt hook. It is a **pure task processor** that never accumulates large outputs in its context. It does NOT brainstorm or analyze business/technology concerns itself; those are delegated to specialist agents.
+
+### Complexity Decision
+
+For every user request, the orchestrator evaluates whether full orchestration is needed:
+
+**Handle directly (no session)** when:
+- Single-file changes
+- Quick questions about the codebase
+- Simple refactors with clear scope
+- Tasks completable in one agent turn
+
+**Create orchestration session** when:
+- Multi-step features requiring different expertise
+- Tasks spanning multiple files/systems
+- Work requiring analysis → design → implementation → testing
+- Anything where persistent state tracking is needed
 
 ### Iteration Loop
 
@@ -139,19 +158,36 @@ Each iteration starts with **clean context** loaded from DB only:
 ```
 1. Load from DB: session.goal, all todos, iteration summaries, notes, recent task summaries
 2. Evaluate todo list:
-   - Any todos left? → Pick highest priority incomplete todo
-   - All todos done? → Synthesize final result, mark session complete
+   a. Regular todos remaining? → Pick highest priority incomplete todo, go to 3
+   b. All regular todos done? → Run "Synthesize & Review" fixed todo
+   c. Synthesizer added new todos? → Go back to 2a
+   d. Synthesizer approved? → Run "Verify" fixed todo
+   e. Verification passed? → Mark session complete
+   f. Verification failed? → Synthesizer analyzes failures, adds fix todos, back to 2a
 3. For picked todo:
    a. Determine task category (from todo metadata or inference)
    b. Look up tier + skill from mapping table
    c. Spawn agent with: tier model, skill prompt, task description, relevant context refs
-   d. Receive structured output from agent
-   e. Store output to filesystem (.agentz/sessions/<id>/<task>/output.md)
-   f. Store task summary + status in DB
+   d. Agent writes full output to .agentz/sessions/<id>/<task>/output.md directly
+   e. Agent returns completion report to orchestrator: file reference, short summary, status, recommendations
+   f. Orchestrator stores summary + file reference in DB (never sees full output)
    g. Process agent recommendations (new todos, notes)
 4. Write iteration summary to DB
 5. Next iteration (go to 1)
 ```
+
+**Key principle:** Subagents write their own output files. The orchestrator never receives full outputs — only lightweight completion reports. This keeps the orchestrator's context lean across arbitrarily many iterations.
+
+### Fixed Todo Items
+
+Every orchestration session automatically includes two fixed todos that run after all regular work is complete:
+
+| Fixed Todo | Skill | Trigger | Purpose |
+|---|---|---|---|
+| **Synthesize & Review** | `synthesizer` | All regular todos completed | Reads output files from filesystem, identifies gaps/inconsistencies, may add new todos or approve for verification |
+| **Verify** | `backend-tester` (or appropriate) | Synthesizer approved | Build, test, lint — concrete verification of implementation |
+
+The synthesizer uses **adaptive complexity**: for large/complex task lists it does a deep cross-referencing review and may restructure remaining work; for simple tasks it does a quick sanity check and moves straight to verification. This decision is part of the synthesizer's skill prompt.
 
 ### What the Orchestrator Sees Per Iteration
 
@@ -161,14 +197,16 @@ Each iteration starts with **clean context** loaded from DB only:
 <original user goal>
 
 ## Current Todos
-- [x] 1. Analyze requirements (completed - see task-001 summary)
-- [ ] 2. Design database schema (in_progress)
-- [ ] 3. Implement API endpoints (pending)
+- [x] 1. Analyze requirements (completed - task-001: "5 user stories identified")
+- [x] 2. Design database schema (completed - task-002: "PostgreSQL schema with 4 tables")
+- [ ] 3. Implement API endpoints (in_progress)
 - [ ] 4. Write tests (pending)
+- [ ] 5. [FIXED] Synthesize & Review (pending - runs after all regular todos)
+- [ ] 6. [FIXED] Verify (pending - runs after synthesizer approves)
 
 ## Iteration History
 - Iteration 1: Dispatched business-analyst for requirements. Added 3 new todos.
-- Iteration 2: Dispatched database-architect for schema design. In progress.
+- Iteration 2: Dispatched database-architect for schema design. Completed.
 
 ## Notes
 - User prefers PostgreSQL over MySQL (from business-analyst)
@@ -178,21 +216,36 @@ Each iteration starts with **clean context** loaded from DB only:
 ### task-001: Analyze Requirements (business-analyst)
 Status: completed
 Summary: Identified 5 user stories, 12 acceptance criteria. Key finding: ...
-Recommendations: [Add todo: "Design auth flow", Add note: "User wants SSO support"]
+Output: .agentz/sessions/abc123/task-001/output.md
+
+### task-002: Design Database Schema (database-architect)
+Status: completed
+Summary: Designed PostgreSQL schema with 4 tables, migrations included.
+Output: .agentz/sessions/abc123/task-002/output.md
 ```
 
 ## 7. Communication Protocol
 
-### Agent Output Structure
+### Principle: Subagent Writes, Orchestrator Reads Summaries
 
-Every agent returns structured output:
+Subagents write their full output directly to the filesystem. The orchestrator **never** receives full outputs — only lightweight completion reports. This is critical for keeping the orchestrator's context lean across many iterations.
+
+### What the Subagent Does (Before Returning)
+
+1. Performs its work (analysis, implementation, review, etc.)
+2. Writes full output to the designated path: `{{output_path}}` (injected via template variable)
+3. Returns a **completion report** to the orchestrator (this is all the orchestrator sees)
+
+### Full Output File (Written by Subagent)
+
+Written to `.agentz/sessions/<session>/<task>/output.md`:
 
 ```markdown
 ## Summary
 <2-5 sentence summary of what was done and key findings>
 
 ## Details
-<Full analysis/implementation details>
+<Full analysis/implementation details — can be arbitrarily long>
 
 ## Artifacts
 <List of files created/modified with paths>
@@ -203,11 +256,32 @@ Every agent returns structured output:
 - NEEDS_REVIEW: <what needs human review and why>
 ```
 
-### Large Output Routing
+### Completion Report (Returned to Orchestrator)
 
-- Agent outputs always go to filesystem: `.agentz/sessions/<session>/<task>/output.md`
-- Only the **Summary** and **Recommendations** sections are stored in the DB task record
-- The orchestrator works from summaries; full outputs are available via filesystem reference if a subsequent agent needs deep context
+This is the **only** thing that flows back through the orchestrator's context:
+
+```
+STATUS: completed|failed
+OUTPUT: .agentz/sessions/<session>/<task>/output.md
+SUMMARY: <2-5 sentences, hard limit — same as the Summary section in the full output>
+RECOMMENDATIONS:
+- ADD_TODO: <description> [priority: high|medium|low] [category: <task-category>]
+- ADD_NOTE: <key insight for future iterations>
+- NEEDS_REVIEW: <what needs human review and why>
+```
+
+The `Details` and `Artifacts` sections stay in the output file only — they never travel through the orchestrator's context. Subsequent agents that need deep context from a prior task read the output file directly from the filesystem.
+
+### Cross-Agent Context
+
+When a subagent needs context from a prior task's output:
+1. The orchestrator includes the output file path in the task prompt
+2. The subagent reads the file directly from the filesystem
+3. This keeps the orchestrator lean while giving agents access to full prior outputs
+
+### Synthesizer Access
+
+The synthesizer agent is special: it reads **all** output files for the session to build a holistic view. It receives the list of all task output paths and reads them from the filesystem, never through the orchestrator.
 
 ## 8. Persistence Schema
 
@@ -289,29 +363,50 @@ CREATE TABLE notes (
 
 ## 9. Plugin Integration
 
+### Always-On Orchestrator
+
+The orchestrator is the **main agent** — always active, not activated by slash commands. Like oh-my-opencode-slim's phase-reminder, the orchestrator prompt is injected into every conversation via the system prompt hook.
+
 ### Entry Point
 
 The plugin registers:
-- **Hook** (`experimental.chat.messages.transform`): Injects orchestrator awareness into the system prompt when an agentz session is active
-- **Slash commands**: `/agentz <goal>` to start a session, `/agentz-status` to check progress, `/agentz-resume` to resume a paused session
+- **Hook** (`experimental.chat.system.transform`): Always injects the orchestrator prompt. When no session is active, injects the lean base prompt (role + complexity decision criteria). When a session is active, injects the full orchestrator state from DB.
+- **Hook** (`experimental.session.compacting`): Injects agentz state into compaction context (see Section 12)
+- **Hook** (`event`): Listens for `session.compacted` and `MessageAbortedError` events (see Sections 12, 13)
+- **Slash commands**: Management commands for session control
+
+```typescript
+"experimental.chat.system.transform": async ({ sessionID }, output) => {
+  const session = db.getActiveSessionByOpenCodeId(sessionID);
+  if (session) {
+    // Full state: goal, todos, iteration history, notes, task summaries
+    output.system.push(buildFullOrchestratorPrompt(session));
+  } else {
+    // Lean prompt: orchestrator role + when to create a session
+    output.system.push(buildBaseOrchestratorPrompt());
+  }
+}
+```
 
 ### Slash Commands
 
 | Command | Description |
 |---------|-------------|
-| `/agentz <goal>` | Start new orchestration session with given goal |
 | `/agentz-status [session-id]` | Show current session status, todos, progress |
-| `/agentz-resume [session-id]` | Resume a paused or interrupted session |
+| `/agentz-resume [session-id]` | Resume a paused or interrupted session (see Section 13) |
 | `/agentz-pause` | Pause current session (saves state) |
 | `/agentz-list` | List all sessions with status |
+
+Note: There is no `/agentz <goal>` command — the orchestrator decides automatically whether to create a session based on task complexity. The user simply talks naturally.
 
 ### Agent Spawning Implementation
 
 Agents are spawned via OpenCode's `@general` subagent system. The plugin:
-1. Constructs the agent prompt: skill content + task description + relevant context references
+1. Constructs the agent prompt: skill content + task description + relevant context refs + output path
 2. Sets the model based on tier mapping from config
 3. Tracks ancestry chain in the task's metadata
-4. Collects structured output and routes to persistence layer
+4. Receives lightweight completion report (never the full output)
+5. Stores summary + file reference in DB
 
 ## 10. Configuration
 
@@ -354,17 +449,54 @@ Each skill file follows this template:
 - <What this agent must NOT do>
 - <Scope boundaries>
 
-## Output Format
-<Required output structure per communication protocol>
+## Output Protocol
+
+You MUST follow this output protocol:
+
+1. Perform your work (analysis, implementation, review, etc.)
+2. Write your full output to: {{output_path}}
+   - Use the format: Summary, Details, Artifacts, Recommendations (see below)
+3. Return ONLY a lightweight completion report to the orchestrator (see below)
+
+### Full Output File (write to {{output_path}})
+
+## Summary
+<2-5 sentence summary>
+
+## Details
+<Full work output — can be arbitrarily long>
+
+## Artifacts
+<Files created/modified with paths>
+
+## Recommendations
+- ADD_TODO: <description> [priority: high|medium|low] [category: <task-category>]
+- ADD_NOTE: <key insight for future iterations>
+- NEEDS_REVIEW: <what needs human review and why>
+
+### Completion Report (return to orchestrator)
+
+STATUS: completed|failed
+OUTPUT: {{output_path}}
+SUMMARY: <2-5 sentences — same as Summary section above>
+RECOMMENDATIONS:
+<same as Recommendations section above>
 
 ## Context
 You are operating as part of an Agentz orchestration session.
 - Session ID: {{session_id}}
 - Task ID: {{task_id}}
 - Your ancestry: {{ancestry_chain}}
+- Write your full output to: {{output_path}}
 - You may spawn leaf agents (local-explorer, web-explorer) for information gathering.
 {{#if can_spawn_non_leaf}}
 - You may spawn ONE non-leaf agent if needed (it can only spawn leaf agents).
+{{/if}}
+{{#if prior_output_paths}}
+- Relevant prior task outputs (read from filesystem if needed):
+{{#each prior_output_paths}}
+  - {{this}}
+{{/each}}
 {{/if}}
 ```
 
@@ -395,7 +527,7 @@ Injects agentz state into the compaction prompt so the resulting summary preserv
     `Goal: ${session.goal}`,
     `Progress: ${todos.filter(t => t.status === 'completed').length}/${todos.length} todos completed`,
     `Current task: ${currentTask ? `${currentTask.id} (${currentTask.skill})` : 'none'}`,
-    `IMPORTANT: After compaction, the orchestrator must continue by loading state from the agentz database. Use /agentz-resume to continue.`
+    `IMPORTANT: After compaction, the orchestrator must continue by loading state from the agentz database and resuming the iteration loop.`
   );
 }
 ```
