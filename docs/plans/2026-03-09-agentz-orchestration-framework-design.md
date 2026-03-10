@@ -324,10 +324,10 @@ User: "Add dark mode support"
 
 ### Iteration Loop
 
-Each iteration starts with **clean context** loaded from DB only:
+Each iteration starts with **clean context** loaded from DB via the working view (see Working View below):
 
 ```
-1. Load from DB: session.goal, all todos, iteration summaries, notes, recent task summaries
+1. Load working view from DB: goal, incomplete todos, completed todo count, last 3 iterations, all notes, last completed task + running task
 2. Check for tasks in needs_input state:
    a. Task awaiting user input? → Relay questions to user, wait for response
    b. User responded? → Forward raw response to same child session, go to 3e
@@ -382,40 +382,83 @@ Every orchestration session automatically includes three fixed todos that run af
 
 The synthesizer uses **adaptive complexity**: for large/complex task lists it does a deep cross-referencing review and may restructure remaining work; for simple tasks it does a quick sanity check and moves straight to verification. This decision is part of the synthesizer's skill prompt.
 
-### What the Orchestrator Sees Per Iteration
+### Working View (What the Orchestrator Sees Per Iteration)
+
+The orchestrator state is injected into every LLM call via the system prompt hook. To prevent unbounded growth in long sessions, the injected state is a **working view** — a pruned, actionable subset of the full DB state. The full state remains in the database, accessible on demand via the `agentz_query` tool.
+
+#### Pruning Rules
+
+| Section | Rule | Rationale |
+|---|---|---|
+| **Goal** | Always show in full | Fixed, small (~50-100 tokens) |
+| **Incomplete todos** | Always show with full description, priority, category | Primary decision input for the orchestrator |
+| **Completed todos** | Count-only: `"N todos completed (use agentz_query 'todos' for details)"` | Summaries of finished work are rarely needed for current decisions |
+| **Iteration history** | Last 3 iterations with full summary + decisions | Recent decisions inform the next step; older history is queryable |
+| **Notes** | Always show all | Notes are the cross-iteration memory that compensates for pruning other sections. Quality enforced via skill prompts (see Section 12), not view pruning. |
+| **Task summaries** | Last completed task + any currently running task | Most recent result informs the next dispatch; older results are queryable |
+
+#### Why Always Inject (No Intent Detection)
+
+The working view is injected on every LLM call — including non-orchestration queries (user asks a quick question mid-session). Rather than trying to classify whether a message is "orchestration-related" (fragile, ambiguous edge cases), the working view is kept compact enough (~800-1,300 tokens) that the overhead is negligible even when not needed. This eliminates the classification problem entirely.
+
+#### Token Budget Estimate (Large Session: 50 Todos, 30 Iterations, 20 Notes)
+
+| Section | Unbounded (old) | Working view |
+|---|---|---|
+| Goal | ~50-100 | ~50-100 |
+| Todos | ~1,500-2,500 (50 with summaries) | ~250-400 (5 incomplete + count line) |
+| Iterations | ~900-1,500 (30 summaries) | ~90-150 (3 summaries) |
+| Notes | ~400-600 (20 notes) | ~400-600 (unchanged) |
+| Task summaries | ~500-1,000 (10+ recent) | ~50-100 (1-2 tasks) |
+| **Total** | **~3,350-5,700** | **~840-1,350** |
+
+#### On-Demand State Access: `agentz_query` Tool
+
+For data pruned from the working view, the orchestrator can call the `agentz_query` tool (see Section 10 for registration details):
+
+| Section Parameter | Returns |
+|---|---|
+| `todos` | Full todo list with descriptions, statuses, and completion summaries |
+| `iterations` | Full iteration history with summaries and decisions |
+| `task` (+ `task_id`) | Specific task detail: input, output summary, recommendations, status |
+| `notes` (+ optional `keyword`) | All notes, optionally filtered by keyword substring |
+
+The tool reads directly from DB and returns formatted text. No LLM interpretation layer.
+
+#### Rendered Working View Example
 
 ```markdown
 # Session: <session-id>
 ## Goal
 <original user goal>
 
-## Current Todos
-- [x] 1. Analyze requirements (completed - task-001: "5 user stories identified")
-- [x] 2. Design database schema (completed - task-002: "PostgreSQL schema with 4 tables")
-- [ ] 3. Implement API endpoints (in_progress)
-- [ ] 4. Write tests (pending)
-- [ ] 5. [FIXED] Code Review (pending - runs after all impl todos, skipped if no impl)
-- [ ] 6. [FIXED] Synthesize & Review (pending - runs after code review approves)
-- [ ] 7. [FIXED] Verify (pending - runs after synthesizer approves)
+## Todos
+12 todos completed (use agentz_query section="todos" for full list)
+- [ ] 13. Implement API endpoints (in_progress)
+- [ ] 14. Write tests (pending)
+- [ ] 15. [FIXED] Code Review (pending - runs after all impl todos, skipped if no impl)
+- [ ] 16. [FIXED] Synthesize & Review (pending - runs after code review approves)
+- [ ] 17. [FIXED] Verify (pending - runs after synthesizer approves)
 
-## Iteration History
-- Iteration 1: Dispatched business-analyst for requirements. Added 3 new todos.
-- Iteration 2: Dispatched database-architect for schema design. Completed.
+## Recent Iterations (last 3 of 14)
+- Iteration 12: Dispatched frontend-developer for dashboard UI. Completed.
+- Iteration 13: Dispatched backend-developer for notification service. Completed, added 2 rework todos.
+- Iteration 14: Dispatched backend-developer for rework on auth middleware. Completed.
+
+(Use agentz_query section="iterations" for full history)
 
 ## Notes
 - User prefers PostgreSQL over MySQL (from business-analyst)
 - Existing auth system uses JWT (from technical-analyst)
+- Dashboard must support mobile viewports (from ui-ux-designer)
 
-## Recent Task Summaries
-### task-001: Analyze Requirements (business-analyst)
+## Last Completed Task
+### task-014: Rework auth middleware (backend-developer)
 Status: completed
-Summary: Identified 5 user stories, 12 acceptance criteria. Key finding: ...
-Output: .agentz/sessions/abc123/task-001/output.md
+Summary: Refactored auth middleware to support both JWT and session tokens.
+Output: .agentz/sessions/abc123/task-014/output.md
 
-### task-002: Design Database Schema (database-architect)
-Status: completed
-Summary: Designed PostgreSQL schema with 4 tables, migrations included.
-Output: .agentz/sessions/abc123/task-002/output.md
+(Use agentz_query section="task" task_id="<id>" for any task's details)
 ```
 
 ## 8. Communication Protocol
@@ -588,7 +631,8 @@ The orchestrator is the **main agent** — always active, not activated by slash
 The plugin registers:
 - **Agent** (`agentz`): Single subagent with lean base prompt — used as the target for all dispatched skill sessions (see Agent Spawning Implementation below)
 - **Tool** (`agentz_dispatch`): Custom tool the orchestrator LLM calls to spawn skill-specialized agents (see Agent Spawning Implementation below)
-- **Hook** (`experimental.chat.system.transform`): Always injects the orchestrator prompt. When no session is active, injects the lean base prompt (role + complexity decision criteria). When a session is active, injects the full orchestrator state from DB.
+- **Tool** (`agentz_query`): On-demand state query tool for accessing data pruned from the working view (see Section 7, Working View)
+- **Hook** (`experimental.chat.system.transform`): Always injects the orchestrator prompt. When no session is active, injects the lean base prompt (role + complexity decision criteria). When a session is active, injects the working view from DB (see Section 7, Working View).
 - **Hook** (`experimental.session.compacting`): Injects agentz state into compaction context (see Section 13)
 - **Hook** (`event`): Listens for `session.compacted` and `MessageAbortedError` events (see Sections 12, 13)
 - **Slash commands**: Management commands for session control
@@ -597,8 +641,8 @@ The plugin registers:
 "experimental.chat.system.transform": async ({ sessionID }, output) => {
   const session = db.getActiveSessionByOpenCodeId(sessionID);
   if (session) {
-    // Full state: goal, todos, iteration history, notes, task summaries
-    output.system.push(buildFullOrchestratorPrompt(session));
+    // Working view: goal, incomplete todos, completed count, last 3 iterations, all notes, last task
+    output.system.push(buildWorkingView(session));
   } else {
     // Lean prompt: orchestrator role + when to create a session
     output.system.push(buildBaseOrchestratorPrompt());
@@ -619,7 +663,7 @@ Note: There is no `/agentz <goal>` command — the orchestrator decides automati
 
 ### Agent Spawning Implementation
 
-The plugin registers a single `agentz` agent and a custom `agentz_dispatch` tool:
+The plugin registers a single `agentz` agent, the `agentz_dispatch` tool, and the `agentz_query` tool:
 
 ```typescript
 // Agent registration — lean base prompt, subagent mode
@@ -632,8 +676,9 @@ agent: {
   }
 }
 
-// Tool registration — the dispatch mechanism
+// Tool registrations
 tool: {
+  // Dispatch tool — spawns skill-specialized agents
   agentz_dispatch: {
     description: "Dispatch a skill-specialized agent for a todo item",
     parameters: {
@@ -661,6 +706,46 @@ tool: {
       //      Escalation uses tier's escalate_to config (Section 4)
       // 7. Update DB: task status, retries, final_tier, error_detail
       // 8. Return completion report (or failure report) to orchestrator
+    }
+  },
+
+  // Query tool — on-demand access to state pruned from the working view
+  agentz_query: {
+    description: "Query full session state from the database. Use when the working view's pruned data is insufficient.",
+    parameters: {
+      section: {
+        type: "string",
+        enum: ["todos", "iterations", "task", "notes"],
+        description: "Which state section to retrieve"
+      },
+      task_id: {
+        type: "string",
+        description: "Task ID to retrieve details for (required when section is 'task')",
+        optional: true
+      },
+      keyword: {
+        type: "string",
+        description: "Keyword substring filter (only used when section is 'notes')",
+        optional: true
+      },
+    },
+    async execute(args, ctx) {
+      const session = db.getActiveSessionByContext(ctx);
+      if (!session) return "No active agentz session.";
+      switch (args.section) {
+        case "todos":
+          // Returns all todos with descriptions, statuses, completion summaries
+          return formatAllTodos(db.getTodos(session.id));
+        case "iterations":
+          // Returns full iteration history with summaries and decisions
+          return formatAllIterations(db.getIterations(session.id));
+        case "task":
+          // Returns specific task detail: input, output summary, recommendations, status
+          return formatTaskDetail(db.getTask(args.task_id));
+        case "notes":
+          // Returns all notes, optionally filtered by keyword
+          return formatNotes(db.getNotes(session.id), args.keyword);
+      }
     }
   }
 }
@@ -748,6 +833,23 @@ You MUST follow this output protocol:
 - ADD_NOTE: <key insight for future iterations>
 - NEEDS_REVIEW: <what needs human review and why>
 
+### Note Quality Guidelines
+
+ADD_NOTE is for **durable insights and constraints** that future iterations need — not status updates.
+
+**Good notes** (persist across iterations, inform future decisions):
+- "User prefers PostgreSQL over MySQL"
+- "Auth system uses JWT with RS256 signing"
+- "CI pipeline requires Node 20+"
+- "The payments module has no test coverage — handle carefully"
+
+**Bad notes** (duplicates todo/task status, adds noise):
+- "Started working on API endpoints"
+- "Database schema completed successfully"
+- "Dispatched frontend developer"
+
+Notes are always shown in the orchestrator's working view and are never pruned. Keep them high-signal.
+
 ### Completion Report (return to orchestrator)
 
 STATUS: completed|failed|needs_input
@@ -824,15 +926,15 @@ Detects that compaction occurred. The next LLM call will have the enriched summa
 
 #### Hook 3: `experimental.chat.system.transform` — Every LLM Call
 
-Ensures the orchestrator always has current agentz state regardless of compaction.
+Ensures the orchestrator always has current agentz state regardless of compaction. Uses the working view (Section 7) to keep injected state compact.
 
 ```typescript
 "experimental.chat.system.transform": async ({ sessionID }, output) => {
   const session = db.getActiveSessionByOpenCodeId(sessionID);
   if (!session) return;
-  output.system.push(buildOrchestratorStatePrompt(session));
-  // buildOrchestratorStatePrompt() returns the full state block:
-  // goal, todos, iteration history, notes, recent task summaries
+  output.system.push(buildWorkingView(session));
+  // buildWorkingView() returns the pruned state block:
+  // goal, incomplete todos + completed count, last 3 iterations, all notes, last task
 }
 ```
 

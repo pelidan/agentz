@@ -147,7 +147,7 @@ Design plan updated: Section 4 (Tier System) gains Tier Escalation subsection wi
 
 ---
 
-### 4. [ ] Orchestrator State Prompt Can Grow Unbounded
+### 4. [x] Orchestrator State Prompt Can Grow Unbounded
 
 **Design reference:** Section 7 (what the orchestrator sees per iteration), Section 10 (system prompt hook)
 
@@ -169,6 +169,26 @@ This could easily reach 3,000-5,000 tokens injected on every LLM call — includ
 - For non-orchestration queries (user asks a quick question), inject only a minimal "session active, use /agentz-status for details" line
 
 **Decision:**
+
+**Approach: Working View with Rule-Based Pruning + On-Demand Query Tool.**
+
+Replace `buildFullOrchestratorPrompt()` with `buildWorkingView()` — a function that extracts a pruned, actionable subset of session state from DB. Injected on every LLM call via the same `chat.system.transform` hook. No intent detection, no mode switching — the working view is compact enough (~800-1,300 tokens) that overhead is negligible even for non-orchestration queries.
+
+**Pruning rules (fixed, no token counting):**
+- **Goal:** Always shown in full
+- **Incomplete todos:** Always shown with full description, priority, category
+- **Completed todos:** Count-only line (`"N todos completed"`) — summaries pruned
+- **Iteration history:** Last 3 iterations with full summary + decisions — older iterations pruned
+- **Notes:** Always shown in full — notes are the cross-iteration memory that compensates for pruning everything else. Quality enforced via skill prompt guidance (good: durable insights and constraints; bad: status updates)
+- **Task summaries:** Last completed task + any running task only — older task summaries pruned
+
+**On-demand access for pruned data:** New `agentz_query` tool (registered alongside `agentz_dispatch`) lets the orchestrator pull full state sections from DB when needed. Parameters: `section` (todos|iterations|task|notes), optional `task_id`, optional `keyword` filter. Reads directly from DB, returns formatted text.
+
+**Why not intent detection?** Classifying whether a user message is "orchestration-related" vs "casual question" is fragile — edge cases are genuinely ambiguous ("the tests are failing" could be either). The working view eliminates the classification problem: always inject, keep it cheap.
+
+**Token impact (50-todo, 30-iteration session):** ~840-1,350 tokens (working view) vs ~3,350-5,700 tokens (unbounded). A 3-4x reduction.
+
+Design plan updated: Section 7 (Orchestrator Design) gains "Working View" subsection replacing the old "What the Orchestrator Sees Per Iteration" with pruning rules, token budget table, and rendered example. Iteration loop step 1 updated to reference working view. Section 10 (Plugin Integration) gains `agentz_query` tool registration, hook code updated from `buildFullOrchestratorPrompt` to `buildWorkingView`. Section 12 (Skill File Structure) gains note quality guidelines. Section 13 (Autocompact Resilience) Hook 3 updated to reference `buildWorkingView`.
 
 ---
 
