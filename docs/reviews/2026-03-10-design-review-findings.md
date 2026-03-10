@@ -319,7 +319,7 @@ This column is nullable, defaults to null, and is completely ignored by v1 logic
 
 ---
 
-### 8. [ ] Orchestrator Minimum Model Tier
+### 8. [x] Orchestrator Minimum Model Tier
 
 **Design reference:** Section 4 (tier system), Section 7 (orchestrator design)
 
@@ -339,6 +339,30 @@ A weak orchestrator model could:
 - (c) Use a dedicated orchestrator model config separate from the user's primary model
 
 **Decision:**
+
+**Approach: Startup Warning + Tier Rating Attribute + Substring Model Matching.**
+
+The plugin does not override the user's model. Instead, it detects model capability at orchestration session startup and emits a one-time warning if the active model falls below the configured threshold. The orchestrator runs the full pipeline regardless — no degradation, no blocking.
+
+**New tier attribute: `rating`** — a t-shirt size (S, M, L, XL) expressing each tier's general model capability. Added to the tier definition in Section 4. Ordering: `S < M < L < XL`. This avoids hardcoding model-specific knowledge — tier comparisons use the `rating` field instead of maintaining a separate model capability lookup table.
+
+**New config field: `orchestrator_tier`** — specifies the minimum recommended tier for the orchestrator (default: `balanced`/M). Added to Section 11.
+
+**Model-to-tier resolution (substring match):** At session startup, the plugin resolves the user's active OpenCode model ID to a tier by checking if the model ID contains any tier's configured `model` value as a substring. Example: user's model `claude-3.5-sonnet` contains `sonnet` → matches tier `balanced` (rating M). Longest match first to avoid false prefix matches. Unknown models (no substring match) are assumed capable — no false warnings.
+
+**Warning mechanism:** When the resolved rating is below the `orchestrator_tier`'s rating, the plugin injects a one-time warning into the conversation via the system prompt:
+
+> "Note: Your current model ({model_id}, resolved to tier {resolved_tier}/rating {rating}) is below the recommended orchestrator tier ({orchestrator_tier}/rating {min_rating}). Task decomposition, routing, and recommendation processing may be degraded. Consider switching to a {min_rating}+ model for orchestration sessions."
+
+Warning is emitted once per session, tracked by `warning_shown` in the sessions table.
+
+**No override, no degradation (v1).** Full pipeline runs regardless of model. If real-world usage shows weak-model orchestration is a common failure pattern, adaptive prompt complexity (simplified orchestrator prompt for weak models) can be added as a v2 enhancement.
+
+**Schema changes:** `sessions` table gains `warning_shown` (BOOLEAN, default false).
+
+**Config changes:** Section 11 gains `orchestrator_tier` field (string, default `"balanced"`). Tier config objects gain `rating` field (S/M/L/XL).
+
+**Design plan changes:** Section 4 (Tier System) tier table gains Rating column, rating description added. Section 7 (Orchestrator Design) gains "Model Capability Check" subsection after Complexity Decision. Section 9 (Persistence Schema) `sessions` table gains `warning_shown` field. Section 11 (Configuration) tier objects gain `rating` field, new `orchestrator_tier` field added.
 
 ---
 

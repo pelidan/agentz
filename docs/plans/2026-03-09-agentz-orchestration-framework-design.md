@@ -78,12 +78,14 @@ During development, superpowers can remain active for non-agentz OpenCode sessio
 
 Semantic tier tags abstracted from concrete models. Users map tiers to models in config.
 
-| Tier | Intent | Example Models |
-|------|--------|----------------|
-| `fast-cheap` | Quick lookups, simple transforms | haiku, gpt-4o-mini, gemini-flash |
-| `balanced` | Most coding tasks, analysis | sonnet, gpt-4o, gemini-pro |
-| `powerful` | Complex architecture, large refactors | opus, o1, gemini-ultra |
-| `reasoning` | Multi-step logic, math, planning | o1, o3, deepseek-r1 |
+| Tier | Rating | Intent | Example Models |
+|------|--------|--------|----------------|
+| `fast-cheap` | S | Quick lookups, simple transforms | haiku, gpt-4o-mini, gemini-flash |
+| `balanced` | M | Most coding tasks, analysis | sonnet, gpt-4o, gemini-pro |
+| `powerful` | L | Complex architecture, large refactors | opus, o1, gemini-ultra |
+| `reasoning` | XL | Multi-step logic, math, planning | o1, o3, deepseek-r1 |
+
+**Rating** — a t-shirt size (S, M, L, XL) expressing the tier's general model capability. Used for tier comparisons (e.g., orchestrator minimum model check) without hardcoding model-specific knowledge. Ordering: `S < M < L < XL`.
 
 **No cost multiplier in tier definition** — that's a config-time decision by the user.
 
@@ -338,6 +340,22 @@ For every user request, the orchestrator evaluates whether full orchestration is
 - Tasks spanning multiple files/systems
 - Work requiring analysis → design → implementation → testing
 - Anything where persistent state tracking is needed
+
+### Model Capability Check
+
+Before creating an orchestration session, the plugin checks whether the user's active model meets the minimum capability threshold for orchestration. The orchestrator makes routing decisions (task categorization, tier selection, recommendation processing, iteration control) that require strong reasoning — a weak model orchestrating expensive specialists is wasteful.
+
+**Resolution mechanism (substring match):** The plugin resolves the user's active OpenCode model ID to a tier by checking if the model ID contains any tier's configured `model` value as a substring. Example: user's model `claude-3.5-sonnet` contains `sonnet` → matches tier `balanced` (rating M). Match order: longest `model` value first to avoid false prefix matches.
+
+**Comparison:** The resolved tier's `rating` is compared against the `orchestrator_tier` config's `rating` using the ordering `S < M < L < XL`. If the user's model rates below the threshold, the plugin injects a one-time warning into the conversation via the system prompt:
+
+> "Note: Your current model ({model_id}, resolved to tier {resolved_tier}/rating {rating}) is below the recommended orchestrator tier ({orchestrator_tier}/rating {min_rating}). Task decomposition, routing, and recommendation processing may be degraded. Consider switching to a {min_rating}+ model for orchestration sessions."
+
+**Unknown models:** If the user's model ID does not substring-match any configured tier's `model` field, it is assumed capable (no warning). This avoids false positives on new or custom model IDs.
+
+**No override, no degradation:** The orchestrator runs the full pipeline regardless of the model. The warning is informational only. If real-world usage shows weak-model orchestration is a common failure pattern, adaptive prompt complexity (simplified orchestrator prompt for weak models) can be added as a v2 enhancement.
+
+**Warning tracking:** The `sessions` table includes a `warning_shown` flag (default false) to ensure the warning is emitted at most once per session.
 
 ### Analyst-Mediated Brainstorming (Pre-Session)
 
@@ -664,6 +682,7 @@ CREATE TABLE sessions (
   config TEXT, -- JSON: tier mappings, overrides
   review_cycles INTEGER NOT NULL DEFAULT 0, -- tracks review-rework iterations for cycle limit
   max_review_cycles INTEGER NOT NULL DEFAULT 2, -- configurable limit before escalating to user
+  warning_shown BOOLEAN NOT NULL DEFAULT 0, -- whether the model capability warning has been emitted
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -922,18 +941,25 @@ The SDK also provides `session.prompt_async()` (returns `204: void`) for fire-an
 ```yaml
 # .opencode/agentz.yaml (or in opencode.json under "agentz" key)
 agentz:
+  # Minimum recommended tier for orchestrator model capability check (see Section 7)
+  orchestrator_tier: balanced
+
   tiers:
     fast-cheap:
       model: "haiku"
+      rating: S
       escalate_to: "balanced"
     balanced:
       model: "sonnet"
+      rating: M
       escalate_to: "powerful"
     powerful:
       model: "opus"
+      rating: L
       escalate_to: null  # no further escalation — surface to user
     reasoning:
       model: "o3"
+      rating: XL
       escalate_to: null
 
   # Override default mapping for specific categories
