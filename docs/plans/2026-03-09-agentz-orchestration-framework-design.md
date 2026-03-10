@@ -333,11 +333,19 @@ Each iteration starts with **clean context** loaded from DB only:
    b. User responded? → Forward raw response to same child session, go to 3e
 3. Evaluate todo list:
    a. Regular todos remaining? → Pick highest priority incomplete todo, go to 4
-   b. All regular todos done? → Run "Synthesize & Review" fixed todo
-   c. Synthesizer added new todos? → Go back to 3a
-   d. Synthesizer approved? → Run "Verify" fixed todo
-   e. Verification passed? → Mark session complete
-   f. Verification failed? → Synthesizer analyzes failures, adds fix todos, back to 3a
+   b. All regular todos done? → Check for implementation tasks:
+      - Has completed develop-backend/develop-frontend tasks AND orchestrator deems non-trivial? → Run "Code Review" fixed todo
+      - No reviewable implementation tasks? → Skip to "Synthesize & Review" (step 3e)
+   c. Code Review done:
+      - Reviewer added rework todos? → Go back to 3a (rework todos are regular todos)
+      - Reviewer approved? → Go to 3e
+      - Review cycle limit reached (default 2)? → Surface to user, pause for decision
+   d. Rework todos from reviewer completed? → Re-run "Code Review" (go to 3b)
+   e. Run "Synthesize & Review" fixed todo
+   f. Synthesizer added new todos? → Go back to 3a
+   g. Synthesizer approved? → Run "Verify" fixed todo
+   h. Verification passed? → Mark session complete
+   i. Verification failed? → Synthesizer analyzes failures, adds fix todos, back to 3a
 4. For picked todo:
    a. Determine task category (from todo metadata or inference)
    b. Look up tier + skill from mapping table
@@ -360,12 +368,17 @@ Each iteration starts with **clean context** loaded from DB only:
 
 ### Fixed Todo Items
 
-Every orchestration session automatically includes two fixed todos that run after all regular work is complete:
+Every orchestration session automatically includes three fixed todos that run after all regular work is complete:
 
 | Fixed Todo | Skill | Trigger | Purpose |
 |---|---|---|---|
-| **Synthesize & Review** | `synthesizer` | All regular todos completed | Reads output files from filesystem, identifies gaps/inconsistencies, may add new todos or approve for verification |
+| **Code Review** | `code-reviewer` | All regular todos completed AND at least one non-trivial `develop-backend`/`develop-frontend` todo exists | Reads implementation output files + actual code diffs from filesystem. Reviews for correctness, style, patterns, edge cases. May add rework todos. Skipped if the orchestrator deems all implementation trivial or if no implementation tasks exist. |
+| **Synthesize & Review** | `synthesizer` | Code Review approved (or skipped) | Reads all task output summaries. Identifies requirement gaps, cross-task inconsistencies, architectural misalignment. May add new todos or approve for verification. Does NOT re-evaluate code quality (trusts the reviewer). |
 | **Verify** | `backend-tester` (or appropriate) | Synthesizer approved | Build, test, lint — concrete verification of implementation |
+
+**Reviewer / Synthesizer boundary:** The code reviewer evaluates *implementation quality* (correctness, patterns, edge cases, test coverage of implementation code). The synthesizer evaluates *project completeness* (requirement coverage, cross-task coherence, gap analysis). The synthesizer trusts that reviewer-approved code is correct and focuses exclusively on whether the right things were built and whether they fit together.
+
+**Review cycle limit:** To prevent infinite review-rework loops, the session tracks a `review_cycle` counter. After N cycles (configurable, default 2), the orchestrator escalates to the user with outstanding issues and pauses for a decision.
 
 The synthesizer uses **adaptive complexity**: for large/complex task lists it does a deep cross-referencing review and may restructure remaining work; for simple tasks it does a quick sanity check and moves straight to verification. This decision is part of the synthesizer's skill prompt.
 
@@ -381,8 +394,9 @@ The synthesizer uses **adaptive complexity**: for large/complex task lists it do
 - [x] 2. Design database schema (completed - task-002: "PostgreSQL schema with 4 tables")
 - [ ] 3. Implement API endpoints (in_progress)
 - [ ] 4. Write tests (pending)
-- [ ] 5. [FIXED] Synthesize & Review (pending - runs after all regular todos)
-- [ ] 6. [FIXED] Verify (pending - runs after synthesizer approves)
+- [ ] 5. [FIXED] Code Review (pending - runs after all impl todos, skipped if no impl)
+- [ ] 6. [FIXED] Synthesize & Review (pending - runs after code review approves)
+- [ ] 7. [FIXED] Verify (pending - runs after synthesizer approves)
 
 ## Iteration History
 - Iteration 1: Dispatched business-analyst for requirements. Added 3 new todos.
@@ -488,6 +502,8 @@ CREATE TABLE sessions (
   goal TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active', -- active, completed, paused, failed
   config TEXT, -- JSON: tier mappings, overrides
+  review_cycles INTEGER NOT NULL DEFAULT 0, -- tracks review-rework iterations for cycle limit
+  max_review_cycles INTEGER NOT NULL DEFAULT 2, -- configurable limit before escalating to user
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -685,6 +701,7 @@ agentz:
   defaults:
     max_iterations: 50
     max_concurrent_tasks: 1  # sequential by default
+    max_review_cycles: 2  # review-rework cycles before escalating to user
     output_format: "markdown"
 ```
 
