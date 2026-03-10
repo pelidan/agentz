@@ -679,6 +679,7 @@ CREATE TABLE todos (
   completed_by TEXT, -- which task completed this todo
   rework_of INTEGER REFERENCES todos(id), -- if this is a rework todo, points to the original
   sort_order INTEGER NOT NULL DEFAULT 0,
+  depends_on TEXT, -- JSON array of todo IDs; nullable, unused in v1 (schema prep for v2 parallel dispatch)
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -914,7 +915,7 @@ The `system` field in `session.prompt()` is **appended** to the agent's register
 - Skill-specific protocol, task context, and output format go in `system` at dispatch time
 - This matches the pattern used by oh-my-opencode's `delegate_task` tool
 
-The SDK also provides `session.prompt_async()` (returns `204: void`) for fire-and-forget dispatch, available for future concurrent execution support.
+The SDK also provides `session.prompt_async()` (returns `204: void`) for fire-and-forget dispatch. This is noted as an available SDK capability but is **not used in v1** — all dispatch is synchronous via `session.prompt()`. Concurrent dispatch using `prompt_async()` is a v2 concern (see review Finding #7 decision).
 
 ## 11. Configuration
 
@@ -943,7 +944,6 @@ agentz:
   # Session defaults
   defaults:
     max_iterations: 50
-    max_concurrent_tasks: 1  # sequential by default
     max_review_cycles: 2  # review-rework cycles before escalating to user
     output_format: "markdown"
 ```

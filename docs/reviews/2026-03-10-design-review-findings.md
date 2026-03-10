@@ -260,7 +260,7 @@ Design plan updated: Section 6 (Spawning Model) dispatch flow steps 3 and 8 adde
 
 ## Medium Priority (Design Improvements)
 
-### 7. [ ] Resolve or Remove Parallel Task Execution
+### 7. [x] Resolve or Remove Parallel Task Execution
 
 **Design reference:** Section 11, line 430 (`max_concurrent_tasks: 1`)
 
@@ -281,6 +281,41 @@ Half-designed parallelism is worse than no parallelism — it creates false expe
 Option (a) is strongly recommended for v1.
 
 **Decision:**
+
+**Approach: Sequential v1 + Schema Prep for Future Parallelism.**
+
+Remove `max_concurrent_tasks` from the v1 config. The orchestrator dispatches exactly one task per iteration — no concurrent execution, no collection semantics, no dependency resolution. This is a deliberate commitment, not a deferral.
+
+**Schema prep (zero-cost foundation for v2):** Add a `depends_on` column to the `todos` table:
+
+```sql
+depends_on TEXT, -- JSON array of todo IDs; nullable, unused in v1 (schema prep for v2 parallel dispatch)
+```
+
+This column is nullable, defaults to null, and is completely ignored by v1 logic. Its presence means v2 parallelism won't require a schema migration on existing databases.
+
+**What gets removed:**
+- `max_concurrent_tasks` from the config schema (Section 11)
+
+**What gets clarified:**
+- The `session.prompt_async()` mention (Section 6) is kept as a factual note about SDK capability but explicitly marked as "not used in v1"
+
+**What stays unchanged:**
+- The iteration loop (Section 7) remains strictly sequential — one todo picked, one dispatch, one result processed per iteration
+- `agentz_dispatch` remains synchronous (`session.prompt()` only)
+- The escalation ladder operates on a single task at a time
+
+**Why not v1 parallelism:** The effort estimate is 5-15 days depending on approach, with significant design surface (dependency specification, conflict resolution, concurrent failure semantics, multi-task TUI visibility). The sequential loop's bottleneck is LLM latency per call, not serial dispatch — and parallelism multiplies token cost and debugging complexity. The value is real but situational (independent modules, parallel research), and doesn't justify the risk for v1.
+
+**v2 parallelism requirements (for future design phase):**
+- Dependency graph between todos (using the `depends_on` column)
+- Independent-todo selection algorithm (topological sort on the DAG)
+- `session.prompt_async()` based concurrent dispatch with barrier collection
+- Domain isolation strategy for conflict avoidance
+- Multi-task `ctx.metadata()` visibility
+- Concurrent failure/escalation semantics
+
+**Design plan changes:** Section 9 `todos` table gains `depends_on TEXT` column (nullable, v2 prep). Section 11 `max_concurrent_tasks` removed from config. Section 6 `session.prompt_async()` note clarified as not used in v1.
 
 ---
 
