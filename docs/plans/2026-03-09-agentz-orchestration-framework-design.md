@@ -162,10 +162,13 @@ All agent dispatch goes through the `agentz_dispatch` tool — a custom tool reg
 
 1. Creates a child session via `client.session.create({ parentID })`
 2. Selects a model from tier config based on skill requirements
-3. Composes the system prompt (protocol template + skill content + task context)
-4. Calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides
-5. Validates output and runs the escalation ladder on failure (see Failure Handling below)
-6. Updates DB (including retry metadata), returns completion or failure report
+3. Publishes live status via `ctx.metadata()` (see Section 6, User Visibility During Dispatch)
+4. Composes the system prompt (protocol template + skill content + task context)
+5. Calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides
+6. Validates output and runs the escalation ladder on failure (see Failure Handling below)
+7. Updates DB (including retry metadata)
+8. Syncs agentz todos to OpenCode's sidebar (see Section 6, Sidebar Todo Sync)
+9. Returns completion or failure report
 
 The plugin registers a single `agentz` agent (mode: `"subagent"`) with a lean base prompt covering identity, safety boundaries, and general output format expectations. All skill-specific instructions are injected via the `system` parameter at dispatch time — the SDK **appends** this to the agent's base prompt (agent prompt first, then environment/instructions, then the `system` value).
 
@@ -241,6 +244,65 @@ The orchestrator treats this similarly to `needs_input` — it relays the failur
 - **Wrong skill assignment** — If a task fails because it was assigned the wrong skill, the user will see it at the surface-to-user step and can rephrase. Automatic re-routing is a v2 concern.
 - **Partial output recovery** — If a subagent wrote partial output before failing, this design discards it and retries from scratch. Incremental recovery is not worth the complexity for v1.
 - **Cost budgets** — The design records `retries` and `final_tier` for visibility, but does not enforce cost limits. Cost tracking is a separate concern.
+
+### User Visibility During Dispatch
+
+The `agentz_dispatch` tool provides real-time user feedback via `ctx.metadata()` — the same mechanism OpenCode's Bash tool uses for streaming command output and the Task tool uses for subtask progress. Each `ctx.metadata()` call updates the tool's display in the TUI instantly via a `message.part.updated` event.
+
+#### Metadata Lifecycle
+
+| Moment | `ctx.metadata()` call | What the user sees |
+|---|---|---|
+| Dispatch start | `ctx.metadata({ title: "Designing DB schema [3/7]", metadata: { todo: "Design DB schema", tier: "balanced", skill: "backend-developer", progress: "3/7" } })` | Tool status line: `Designing DB schema [3/7]` |
+| Escalation (retry) | `ctx.metadata({ title: "Designing DB schema [3/7] — retrying (tier: powerful)", metadata: { ... } })` | Status updates in-place |
+| Completion | Tool returns with `title: "Completed: Design DB schema [3/7]"` | Final status line shown |
+
+The `progress` field in metadata uses the format `"<completed>/<total>"` counting all regular todos (excluding fixed todos). This gives the user a simple progress indicator without exposing internal complexity.
+
+### Sidebar Todo Sync
+
+After each task completes (and after the orchestrator adds/removes/reorders todos), the `agentz_dispatch` tool programmatically syncs agentz's internal todos to OpenCode's built-in todo sidebar. This happens inside the tool's `execute` function — no LLM involvement, zero token cost, guaranteed consistency.
+
+#### Mechanism
+
+The tool imports OpenCode's `Todo.update()` function and calls it directly after updating the agentz DB:
+
+```typescript
+// Inside agentz_dispatch.execute(), after DB update:
+import { Todo } from "@opencode-ai/opencode/session/todo"
+
+const agentzTodos = db.getTodos(session.id);
+await Todo.update({
+  sessionID: openCodeSessionID,
+  todos: agentzTodos.map(t => ({
+    id: String(t.id),
+    content: t.description.slice(0, 100),
+    status: mapStatus(t.status),
+    priority: t.priority,
+  })),
+});
+```
+
+#### Status Mapping
+
+| Agentz status | OpenCode status |
+|---|---|
+| `pending` | `pending` |
+| `in_progress` | `in_progress` |
+| `completed` | `completed` |
+| `cancelled` | `cancelled` |
+| `interrupted` | `pending` (shows as resumable) |
+| `needs_rework` | `pending` (the rework todo appears separately) |
+
+#### What's Dropped
+
+Agentz-specific fields (`category`, `rework_of`, `added_by`, `completed_by`, `sort_order`) are not synced to the sidebar — they remain in the agentz DB for the orchestrator and `/agentz-status`. The sidebar shows a simplified progress view.
+
+#### Sync Triggers
+
+1. Inside `agentz_dispatch.execute()`: after DB update, before returning the completion/failure report
+2. After the orchestrator adds new todos from agent recommendations (step 4i of the iteration loop)
+3. After interruption handling updates todo statuses (Section 14)
 
 ### Depth Visualization
 
@@ -365,6 +427,16 @@ Each iteration starts with **clean context** loaded from DB via the working view
 ```
 
 **Key principle:** Subagents write their own output files. The orchestrator never receives full outputs — only lightweight completion reports. This keeps the orchestrator's context lean across arbitrarily many iterations.
+
+### Progress Summary Instruction
+
+The orchestrator's system prompt includes a soft instruction to print a one-line progress summary to the conversation after each dispatch returns. This gives the user a textual breadcrumb trail in the chat alongside the live metadata and sidebar sync.
+
+**Prompt instruction:** `"After each agentz_dispatch call completes, output a single progress line in the format: 'Completed: <todo description> [N/M todos]. Next: <next todo description>.' Do not elaborate beyond this line."`
+
+**Example output:** `Completed: Design DB schema [3/7 todos]. Next: Implement OAuth2 middleware.`
+
+This is a soft instruction — if the LLM skips it, the sidebar and tool metadata still provide full visibility. The instruction is designed to be low-friction: one line, no analysis, no commentary.
 
 ### Fixed Todo Items
 
@@ -699,12 +771,53 @@ The plugin registers:
 
 | Command | Description |
 |---------|-------------|
-| `/agentz-status [session-id]` | Show current session status, todos, progress |
+| `/agentz-status [session-id]` | Show current session status, todos, progress, recent activity, and notes (see /agentz-status Output Format below) |
 | `/agentz-resume [session-id]` | Resume a paused or interrupted session (see Section 14) |
 | `/agentz-pause` | Pause current session (saves state) |
 | `/agentz-list` | List all sessions with status |
 
 Note: There is no `/agentz <goal>` command — the orchestrator decides automatically whether to create a session based on task complexity. The user simply talks naturally.
+
+### `/agentz-status` Output Format
+
+The `/agentz-status` command reads from the DB and outputs a formatted progress report. It works mid-execution because it reads DB state, not conversation history. This is the user's "catch-up" view — what happened while they weren't watching.
+
+**Sections:**
+
+1. **Header:** Session goal, elapsed time, current iteration number, session status
+2. **Progress:** All todos with statuses, completion times for finished items, skill assignment for the running item
+3. **Recent Activity:** Last N iteration summaries showing what was dispatched, what completed, what recommendations were processed
+4. **Notes:** All active notes with attribution
+5. **Failures:** Summary of any failed tasks (if none, shows `"none"`)
+
+**Rendered example:**
+
+```
+## Session: Refactor auth system to OAuth2
+Started: 12 min ago | Iteration: 5 | Status: running
+
+### Progress: 3/7 todos complete
+  [x] Analyze existing auth code (backend-developer, 2m)
+  [x] Design OAuth2 flow (architect, 3m)
+  [x] Design DB schema changes (backend-developer, 1m)
+  [>] Implement OAuth2 middleware (backend-developer, running...)
+  [ ] Update API endpoints
+  [ ] Write integration tests
+  [ ] Update documentation
+
+### Recent Activity
+  #5: Dispatched "Implement OAuth2 middleware" → tier: balanced, skill: backend-developer
+  #4: Completed "Design DB schema changes" — added note: "Using existing sessions table, adding oauth_tokens"
+  #3: Completed "Design OAuth2 flow" — architect recommended ADD_TODO: "Update documentation"
+
+### Notes (2)
+  - Using existing sessions table, adding oauth_tokens table (from backend-developer)
+  - Team uses passport.js — integrate with existing middleware stack (from technical-analyst)
+
+### Failures: none
+```
+
+**Implementation:** The `command.execute.before` hook intercepts `/agentz-status`, queries the DB, formats the output, and pushes it as a `TextPart` in `output.parts`.
 
 ### Agent Spawning Implementation
 

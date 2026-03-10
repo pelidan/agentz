@@ -226,7 +226,7 @@ Design plan updated: Section 5 (Agent Taxonomy) synthesizer description updated.
 
 ---
 
-### 6. [ ] No User Visibility During Execution
+### 6. [x] No User Visibility During Execution
 
 **Design reference:** Sections 7, 10
 
@@ -244,7 +244,17 @@ Design plan updated: Section 5 (Agent Taxonomy) synthesizer description updated.
 - Make `/agentz-status` work mid-execution with real-time state from the DB
 - Consider a "verbose mode" config option that shows more detail per iteration
 
-**Decision:**
+**Decision:** Resolved with **Three-Layer Passive Visibility** — no active user interaction during execution, but three complementary feedback channels:
+
+1. **Layer 1 — Live Task Status via `ctx.metadata()`**: The `agentz_dispatch` tool calls `ctx.metadata({ title, metadata })` at each orchestrator iteration to stream real-time status into the OpenCode TUI. The title shows a one-line summary (e.g., `"Designing DB schema [3/7]"`), and metadata carries structured fields (current todo, iteration count, phase). This uses the same `message.part.updated` event mechanism that the built-in Bash tool uses for streaming output.
+
+2. **Layer 2 — Sidebar Todo Sync via `Todo.update()`**: After each task completes, the dispatch tool programmatically syncs agentz todo state to OpenCode's built-in todo sidebar using the internal `Todo.update()` function (not LLM-driven todowrite). Status mapping: `pending` → `pending`, `in_progress`/`running` → `in_progress`, `done` → `completed`, `failed`/`blocked` → `pending` (with `[FAILED]`/`[BLOCKED]` prefix). Sync triggers: task status change, new todos added, dispatch start, dispatch end.
+
+3. **Layer 3 — On-Demand `/agentz-status` Slash Command**: Reads directly from the DB and outputs a formatted catch-up report containing: goal summary, todos with status markers, recent activity log (last 5 completed items), active notes/decisions, and any failures. Works mid-execution and after completion. Specified in full in Section 10 (Plugin Integration).
+
+Additionally, the orchestrator system prompt includes a soft instruction to print a one-line progress summary between iterations (specified in Section 7, "Progress Summary Instruction").
+
+Design plan updated: Section 6 (Spawning Model) dispatch flow steps 3 and 8 added, "User Visibility During Dispatch" subsection with metadata lifecycle table, "Sidebar Todo Sync" subsection with mechanism, status mapping, and sync triggers. Section 7 (Orchestrator Design) "Progress Summary Instruction" subsection added. Section 10 (Plugin Integration) `/agentz-status` expanded to full specification with output format, rendered example, and implementation note.
 
 ---
 
