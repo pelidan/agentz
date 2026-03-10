@@ -21,7 +21,7 @@ Each finding is a self-contained item with context, concern, and a suggested dir
 
 ### 1. [x] Agent Spawning Mechanism Is Unspecified
 
-**Design reference:** Section 9, lines 402-409
+**Design reference:** Section 10, lines 402-409
 
 **Concern:** The plan says agents are spawned via "OpenCode's `@general` subagent system" and describes the plugin constructing prompts and setting models programmatically. However, the plugin SDK's `Hooks` interface does not expose a direct "spawn subagent" API. Subagents in OpenCode are spawned via `SubtaskPartInput` message parts — meaning the *LLM* decides to invoke the Task tool, not the plugin code.
 
@@ -49,9 +49,9 @@ Design plan updated: Sections 5 and 9 now reflect the `agentz_dispatch` tool mec
 
 ---
 
-### 2. [ ] Superpowers Plugin Coexistence
+### 2. [x] Superpowers Plugin Coexistence
 
-**Design reference:** Section 9, lines 366-389
+**Design reference:** Section 10, lines 366-389
 
 **Concern:** The superpowers plugin already uses `experimental.chat.system.transform` to inject its bootstrap content into every LLM call. Agentz would be a second plugin doing the same. Both hooks are additive (`output.system.push(...)`), so they won't break each other technically, but:
 
@@ -69,13 +69,42 @@ Design plan updated: Sections 5 and 9 now reflect the `agentz_dispatch` tool mec
 
 **Decision:**
 
+**Approach: Absorb and Replace — agentz subsumes superpowers.**
+
+Agentz becomes the primary workflow framework. The superpowers plugin is disabled when agentz is active and eventually retired. Superpowers' valuable process disciplines (brainstorming rigor, TDD, systematic debugging, verification-before-completion) are ported into agentz skill files rather than discarded.
+
+**Injection conflict resolution:** Agentz's `chat.system.transform` hook suppresses superpowers' injection when the agentz plugin is active. Only one meta-cognitive framework injects at a time — there is no coexistence mode.
+
+**Brainstorming is analyst-mediated, not orchestrator-owned.** Interactive brainstorming is dispatched to a `business-analyst` or `technical-analyst` agent with a brainstorming skill. This preserves the orchestrator's lean context principle. The flow:
+
+1. Orchestrator evaluates complexity, decides brainstorming is needed.
+2. Dispatches analyst agent with brainstorming skill.
+3. Analyst returns `STATUS: needs_input` with questions for the user.
+4. Orchestrator relays questions to user without interpreting them.
+5. User responds. Orchestrator forwards raw response to the same analyst child session (session context persisted).
+6. Analyst continues until `STATUS: complete`, producing a design document as its output file.
+7. Orchestrator reads summary only, creates todos from the design output. Domain knowledge stays in the analyst's session and output files.
+
+**New task state: `needs_input`** — task is paused awaiting user response. The orchestrator acts as a transparent relay (forwarding user text verbatim, not summarizing or interpreting). This keeps brainstorming context entirely out of the orchestrator.
+
+**Design implications:**
+- Task state diagram gains `needs_input` with transitions: `running → needs_input → running → complete`
+- The `tasks` table gains `pending_questions` and `child_session_id` fields for multi-turn relay
+- Analyst skill files carry ported brainstorming discipline (one question at a time, propose approaches, confirm direction)
+- Other superpowers disciplines ported into relevant skill files: TDD into developer skills, debugging methodology into debugger skill, verification into synthesizer/verifier skills
+- The `using-superpowers` meta-skill concept is retired — the orchestrator's complexity decision + skill-based dispatch replaces it
+
+**Migration path:** During development, superpowers can remain active for non-agentz OpenCode sessions. Once agentz handles the full workflow spectrum, the superpowers plugin is retired.
+
+Design plan updated: New Section 2 (Superpowers Coexistence Strategy) added. Section 7 (Orchestrator Design) updated with analyst-mediated brainstorming flow, `needs_input` branch in iteration loop. Section 8 (Communication Protocol) updated with `needs_input` status in completion reports. Section 9 (Persistence Schema) updated with `pending_questions` and `child_session_id` fields in tasks table. Section 14 (Interruption & Resume) updated with `needs_input` in task state diagram.
+
 ---
 
 ## High Priority (Significant Design Gaps)
 
 ### 3. [ ] No Task Failure / Retry Strategy
 
-**Design reference:** Section 6 (iteration loop), Section 13 (interruption only)
+**Design reference:** Section 7 (iteration loop), Section 14 (interruption only)
 
 **Concern:** The design handles user interruption thoroughly but says nothing about what happens when a subagent **fails**. A subagent could:
 - Hit its own context limit mid-work
@@ -84,7 +113,7 @@ Design plan updated: Sections 5 and 9 now reflect the `agentz_dispatch` tool mec
 - Return garbled/incomplete output
 - Time out or crash
 
-The task state diagram (Section 13) shows `failed` as a terminal state with no outgoing transitions. The iteration loop (Section 6, step 3) has no failure branch.
+The task state diagram (Section 14) shows `failed` as a terminal state with no outgoing transitions. The iteration loop (Section 7, step 4) has no failure branch.
 
 **Impact:** A single task failure could stall the entire session with no recovery path.
 
@@ -101,7 +130,7 @@ The task state diagram (Section 13) shows `failed` as a terminal state with no o
 
 ### 4. [ ] Orchestrator State Prompt Can Grow Unbounded
 
-**Design reference:** Section 6 (what the orchestrator sees per iteration), Section 9 (system prompt hook)
+**Design reference:** Section 7 (what the orchestrator sees per iteration), Section 10 (system prompt hook)
 
 **Concern:** The orchestrator state is injected into every LLM call via the system prompt. This state includes: goal, all todos (with summaries), full iteration history, all notes, and recent task summaries. As sessions grow:
 - 50 todos with descriptions and completion summaries
@@ -126,7 +155,7 @@ This could easily reach 3,000-5,000 tokens injected on every LLM call — includ
 
 ### 5. [ ] Synthesizer Context Overflow on Large Sessions
 
-**Design reference:** Section 4 (synthesizer role), Section 7 (synthesizer access)
+**Design reference:** Section 5 (synthesizer role), Section 8 (synthesizer access)
 
 **Concern:** The synthesizer reads **all** output files for the session to build a holistic view. For a 20-task session where each output is 2,000-5,000 tokens, the synthesizer would need to ingest 40,000-100,000 tokens of prior outputs. This could exceed the synthesizer agent's context window, especially if it's running on a `balanced` tier model.
 
@@ -144,7 +173,7 @@ This could easily reach 3,000-5,000 tokens injected on every LLM call — includ
 
 ### 6. [ ] No User Visibility During Execution
 
-**Design reference:** Sections 6, 9
+**Design reference:** Sections 7, 10
 
 **Concern:** The plan describes the orchestrator's internal loop but never mentions what the user sees during execution. Questions unanswered:
 - Does the user see subagent outputs streaming?
@@ -168,7 +197,7 @@ This could easily reach 3,000-5,000 tokens injected on every LLM call — includ
 
 ### 7. [ ] Resolve or Remove Parallel Task Execution
 
-**Design reference:** Section 10, line 430 (`max_concurrent_tasks: 1`)
+**Design reference:** Section 11, line 430 (`max_concurrent_tasks: 1`)
 
 **Concern:** The config exposes `max_concurrent_tasks` (defaulting to 1), implying parallel execution is planned. But the design never describes:
 - How the orchestrator picks multiple todos in one iteration
@@ -192,7 +221,7 @@ Option (a) is strongly recommended for v1.
 
 ### 8. [ ] Orchestrator Minimum Model Tier
 
-**Design reference:** Section 3 (tier system), Section 6 (orchestrator design)
+**Design reference:** Section 4 (tier system), Section 7 (orchestrator design)
 
 **Concern:** The orchestrator makes routing decisions: it categorizes tasks, selects tiers, picks skills, processes recommendations, and manages the todo list. The quality of these decisions depends on the primary model's capability. But the orchestrator runs on whatever model the user has configured as their primary — which could be `haiku` or another cheap/fast model.
 
@@ -215,7 +244,7 @@ A weak orchestrator model could:
 
 ### 9. [ ] Separate Protocol from Domain Skills
 
-**Design reference:** Section 11 (skill file structure)
+**Design reference:** Section 12 (skill file structure)
 
 **Concern:** Each skill file contains both behavioral instructions (how the agent should think — its domain expertise) and protocol specifications (output format, completion report structure, spawning rules, template variables). This means:
 - Changing the output protocol requires editing all 15 skill files
@@ -235,7 +264,7 @@ A weak orchestrator model could:
 
 ### 10. [ ] No Structured Output Validation
 
-**Design reference:** Section 7 (communication protocol)
+**Design reference:** Section 8 (communication protocol)
 
 **Concern:** The completion report is a loosely structured text format (`STATUS: ...\nOUTPUT: ...\nSUMMARY: ...`). The orchestrator (an LLM) must parse this from the subagent's response. There's no validation that:
 - The output file was actually written
@@ -260,7 +289,7 @@ LLMs are unreliable text parsers, especially for their own outputs.
 
 ### 11. [ ] SQLite Resilience
 
-**Design reference:** Section 8 (persistence schema)
+**Design reference:** Section 9 (persistence schema)
 
 **Concern:** The entire system's state lives in a single SQLite file. If the file gets corrupted (crash during write), locked (concurrent access from multiple OpenCode instances), or deleted, the orchestrator loses all session state with no recovery.
 
@@ -280,7 +309,7 @@ LLMs are unreliable text parsers, especially for their own outputs.
 
 ### 12. [ ] "Always-On" Orchestrator May Annoy Users
 
-**Design reference:** Section 6 (complexity decision), Section 9 (always-on)
+**Design reference:** Section 7 (complexity decision), Section 10 (always-on)
 
 **Concern:** The orchestrator is injected into every conversation. It makes a subjective "complexity decision" on every user request. Users might find it frustrating if:
 - The orchestrator creates a session for something the user considers simple
@@ -299,7 +328,7 @@ LLMs are unreliable text parsers, especially for their own outputs.
 
 ### 13. [ ] No Session Cleanup / Archival Strategy
 
-**Design reference:** Section 8 (filesystem structure)
+**Design reference:** Section 9 (filesystem structure)
 
 **Concern:** Sessions accumulate in `.agentz/sessions/` and the SQLite DB indefinitely. Over time:
 - The DB grows with completed/stale sessions
@@ -318,7 +347,7 @@ LLMs are unreliable text parsers, especially for their own outputs.
 
 ### 14. [ ] Cross-Session Learning Is Missing
 
-**Design reference:** Section 8 (notes table)
+**Design reference:** Section 9 (notes table)
 
 **Concern:** Notes are session-scoped. Insights learned in one session (e.g., "this project uses PostgreSQL", "auth is JWT-based", "the team prefers tabs over spaces") are lost when the session ends. The next session starts from zero.
 
@@ -334,7 +363,7 @@ LLMs are unreliable text parsers, especially for their own outputs.
 
 ### 15. [ ] Leaf Agent "Freely Spawnable" Could Be Expensive
 
-**Design reference:** Section 5 (spawning model)
+**Design reference:** Section 6 (spawning model)
 
 **Concern:** Leaf agents (local-explorer, web-explorer) can be spawned "freely" by anyone. There's no limit on how many a single non-leaf agent can spawn. An agent doing broad exploration could spawn 10+ leaf agents, each consuming a model call. Even at `fast-cheap` tier, this adds up.
 

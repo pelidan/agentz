@@ -8,7 +8,46 @@ Agentz is an OpenCode plugin that enables multi-agent orchestration with dynamic
 
 **Inspired by** oh-my-opencode-slim but fundamentally different: agents divided by tier + dynamic skills (not fixed roles), persistence layer for state, clean orchestrator context per iteration, iterative processing with DB state.
 
-## 2. Three-Layer Architecture
+## 2. Superpowers Coexistence Strategy
+
+### Decision: Absorb and Replace
+
+Agentz is the primary workflow framework. The superpowers plugin is disabled when agentz is active and eventually retired. Superpowers' valuable process disciplines (brainstorming rigor, TDD, systematic debugging, verification-before-completion) are ported into agentz skill files rather than discarded.
+
+### Why Not Coexist
+
+Both superpowers and agentz are meta-cognitive frameworks — they inject instructions into every LLM call via `experimental.chat.system.transform` telling the LLM *how to think about work*. Their instructions conflict:
+
+- Superpowers says: "Invoke skills BEFORE any response or action — this is not negotiable."
+- Agentz says: "Be a pure task processor that delegates everything to specialists."
+
+Superpowers wraps its instructions in double-nested `<EXTREMELY_IMPORTANT>` tags with anti-rationalization tables. Agentz uses plain markdown. In a conflict, superpowers will dominate the LLM's attention, making the orchestrator effectively inert.
+
+The combined token cost (superpowers bootstrap ~800-1000 tokens + agentz state 300-3000 tokens) is also wasteful on every LLM call.
+
+### Injection Conflict Resolution
+
+Agentz's `chat.system.transform` hook suppresses superpowers' injection when the agentz plugin is active. Implementation: when both plugins are loaded, agentz filters superpowers' content from `output.system` after both hooks have run, or superpowers checks for an agentz-active flag and skips injection.
+
+### Porting Superpowers Disciplines
+
+Superpowers' process disciplines are absorbed into agentz skill files:
+
+| Superpowers Discipline | Agentz Location |
+|---|---|
+| Brainstorming (interactive exploration, approach proposals) | `business-analyst` / `technical-analyst` skill with brainstorming mode (see Section 7, Analyst-Mediated Brainstorming) |
+| TDD iron law (red-green-refactor) | `backend-developer`, `frontend-developer` skill prompts |
+| Systematic debugging (4-phase root cause investigation) | `debugger` category added to mapping table; debugging discipline in developer skills |
+| Verification before completion | `synthesizer` and verification phase of iteration loop |
+| Writing plans (bite-sized tasks, exact file paths) | Orchestrator's todo decomposition behavior |
+
+The `using-superpowers` meta-skill concept (invoke skills before acting) is retired — the orchestrator's complexity decision + skill-based dispatch replaces it. The orchestrator *is* the meta-skill.
+
+### Migration Path
+
+During development, superpowers can remain active for non-agentz OpenCode sessions. Once agentz handles the full workflow spectrum, the superpowers plugin is retired.
+
+## 3. Three-Layer Architecture
 
 ```
 ┌─────────────────────────────────────┐
@@ -35,7 +74,7 @@ Agentz is an OpenCode plugin that enables multi-agent orchestration with dynamic
 └─────────────────────────────────────┘
 ```
 
-## 3. Tier System
+## 4. Tier System
 
 Semantic tier tags abstracted from concrete models. Users map tiers to models in config.
 
@@ -71,7 +110,7 @@ The orchestrator sees this table in its prompt as a reference frame. It follows 
 | synthesize | balanced | synthesizer |
 | verify | balanced | backend-tester |
 
-## 4. Agent Taxonomy
+## 5. Agent Taxonomy
 
 ### Leaf Agents (Context Compressors)
 
@@ -102,7 +141,7 @@ Non-leaf agents perform substantive work. They have direct tool access for simpl
 | `technical-writer` | Documentation, API docs, guides |
 | `synthesizer` | Reads all task outputs, identifies gaps/inconsistencies, consolidates review. Can add new todos, flag issues, or approve for verification. Adapts depth based on task complexity. |
 
-## 5. Spawning Model
+## 6. Spawning Model
 
 ### Mechanism
 
@@ -145,7 +184,7 @@ Orchestrator
     └── local-explorer (leaf) ← freely spawned
 ```
 
-## 6. Orchestrator Design
+## 7. Orchestrator Design
 
 The orchestrator is the **main agent** — always active, injected into every conversation via the system prompt hook. It is a **pure task processor** that never accumulates large outputs in its context. It does NOT brainstorm or analyze business/technology concerns itself; those are delegated to specialist agents.
 
@@ -165,29 +204,78 @@ For every user request, the orchestrator evaluates whether full orchestration is
 - Work requiring analysis → design → implementation → testing
 - Anything where persistent state tracking is needed
 
+### Analyst-Mediated Brainstorming (Pre-Session)
+
+When the orchestrator determines a task is complex enough for orchestration, it may need to explore requirements before decomposing into todos. This is handled by dispatching an analyst agent — **not** by the orchestrator itself — to preserve the orchestrator's lean context.
+
+**Why not brainstorm in the orchestrator?** Brainstorming is inherently interactive (questions, answers, approach proposals, approvals). If the orchestrator runs this conversation, it accumulates all exploration context in its own session, violating the "clean context per iteration, loaded from DB only" principle.
+
+**The relay pattern:** The orchestrator dispatches a `business-analyst` (or `technical-analyst`) with a brainstorming skill. The analyst explores requirements and returns questions. The orchestrator relays questions to the user without interpreting them, then forwards the user's raw response back to the analyst's persisted child session. The orchestrator never processes domain content — it acts as a transparent relay.
+
+**Flow:**
+
+```
+User: "Add dark mode support"
+
+1. Orchestrator: Complex task → dispatches business-analyst with brainstorming skill
+   Task: "Explore requirements for dark mode support"
+
+2. Analyst (turn 1): Returns completion report:
+   STATUS: needs_input
+   QUESTIONS:
+   1. Should dark mode follow system preference or be manual toggle?
+   2. Do you want CSS variables or a theme provider?
+   3. Which components need theming?
+
+3. Orchestrator: Sees STATUS: needs_input → surfaces questions to user verbatim
+
+4. User: "System preference with manual override, CSS variables, all components"
+
+5. Orchestrator: Forwards raw user response to same analyst child session
+   (session context persisted — analyst retains full brainstorming history)
+
+6. Analyst (turn 2): Has full context from turn 1 + answers
+   STATUS: complete
+   OUTPUT: .agentz/sessions/<id>/task-001/output.md (design document)
+   SUMMARY: "Dark mode design finalized: CSS variables, system pref + toggle..."
+
+7. Orchestrator: Reads summary only → creates todos from design output
+   Domain knowledge stays in analyst's session and output files
+```
+
+**Key properties:**
+- The analyst's context is persisted in its own child session. Re-dispatch continues the same session via `session.prompt()`.
+- The orchestrator stays lean: it sees "analyst needs input, here are questions" → relays → "analyst is done, here's a summary." No domain knowledge in orchestrator context.
+- The output file (design document) becomes the knowledge artifact. Later agents receive it as context when dispatched.
+- The orchestrator forwards user responses verbatim — no paraphrasing, no summarizing.
+
 ### Iteration Loop
 
 Each iteration starts with **clean context** loaded from DB only:
 
 ```
 1. Load from DB: session.goal, all todos, iteration summaries, notes, recent task summaries
-2. Evaluate todo list:
-   a. Regular todos remaining? → Pick highest priority incomplete todo, go to 3
+2. Check for tasks in needs_input state:
+   a. Task awaiting user input? → Relay questions to user, wait for response
+   b. User responded? → Forward raw response to same child session, go to 3e
+3. Evaluate todo list:
+   a. Regular todos remaining? → Pick highest priority incomplete todo, go to 4
    b. All regular todos done? → Run "Synthesize & Review" fixed todo
-   c. Synthesizer added new todos? → Go back to 2a
+   c. Synthesizer added new todos? → Go back to 3a
    d. Synthesizer approved? → Run "Verify" fixed todo
    e. Verification passed? → Mark session complete
-   f. Verification failed? → Synthesizer analyzes failures, adds fix todos, back to 2a
-3. For picked todo:
+   f. Verification failed? → Synthesizer analyzes failures, adds fix todos, back to 3a
+4. For picked todo:
    a. Determine task category (from todo metadata or inference)
    b. Look up tier + skill from mapping table
    c. Spawn agent with: tier model, skill prompt, task description, relevant context refs
    d. Agent writes full output to .agentz/sessions/<id>/<task>/output.md directly
    e. Agent returns completion report to orchestrator: file reference, short summary, status, recommendations
-   f. Orchestrator stores summary + file reference in DB (never sees full output)
-   g. Process agent recommendations (new todos, notes)
-4. Write iteration summary to DB
-5. Next iteration (go to 1)
+   f. If STATUS is needs_input: store questions in DB, surface to user, pause iteration (go to 2)
+   g. Orchestrator stores summary + file reference in DB (never sees full output)
+   h. Process agent recommendations (new todos, notes)
+5. Write iteration summary to DB
+6. Next iteration (go to 1)
 ```
 
 **Key principle:** Subagents write their own output files. The orchestrator never receives full outputs — only lightweight completion reports. This keeps the orchestrator's context lean across arbitrarily many iterations.
@@ -238,7 +326,7 @@ Summary: Designed PostgreSQL schema with 4 tables, migrations included.
 Output: .agentz/sessions/abc123/task-002/output.md
 ```
 
-## 7. Communication Protocol
+## 8. Communication Protocol
 
 ### Principle: Subagent Writes, Orchestrator Reads Summaries
 
@@ -275,13 +363,16 @@ Written to `.agentz/sessions/<session>/<task>/output.md`:
 This is the **only** thing that flows back through the orchestrator's context:
 
 ```
-STATUS: completed|failed
+STATUS: completed|failed|needs_input
 OUTPUT: .agentz/sessions/<session>/<task>/output.md
 SUMMARY: <2-5 sentences, hard limit — same as the Summary section in the full output>
 RECOMMENDATIONS:
 - ADD_TODO: <description> [priority: high|medium|low] [category: <task-category>]
 - ADD_NOTE: <key insight for future iterations>
 - NEEDS_REVIEW: <what needs human review and why>
+QUESTIONS: (only when STATUS is needs_input)
+- <question 1>
+- <question 2>
 ```
 
 The `Details` and `Artifacts` sections stay in the output file only — they never travel through the orchestrator's context. Subsequent agents that need deep context from a prior task read the output file directly from the filesystem.
@@ -297,7 +388,7 @@ When a subagent needs context from a prior task's output:
 
 The synthesizer agent is special: it reads **all** output files for the session to build a holistic view. It receives the list of all task output paths and reads them from the filesystem, never through the orchestrator.
 
-## 8. Persistence Schema
+## 9. Persistence Schema
 
 ### SQLite Tables
 
@@ -333,11 +424,13 @@ CREATE TABLE tasks (
   todo_id INTEGER REFERENCES todos(id),
   skill TEXT NOT NULL, -- agent skill used
   tier TEXT NOT NULL, -- tier used
-  status TEXT NOT NULL DEFAULT 'pending', -- pending, running, completed, failed, interrupted
+  status TEXT NOT NULL DEFAULT 'pending', -- pending, running, completed, failed, interrupted, needs_input
   input_summary TEXT, -- what was asked
   output_summary TEXT, -- compressed result
   output_path TEXT, -- filesystem path to full output
   recommendations TEXT, -- JSON array of recommendations
+  pending_questions TEXT, -- JSON array of questions when status is needs_input
+  child_session_id TEXT, -- OpenCode child session ID for multi-turn relay (needs_input flow)
   iteration INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT
@@ -375,7 +468,7 @@ CREATE TABLE notes (
         └── ...
 ```
 
-## 9. Plugin Integration
+## 10. Plugin Integration
 
 ### Always-On Orchestrator
 
@@ -387,7 +480,7 @@ The plugin registers:
 - **Agent** (`agentz`): Single subagent with lean base prompt — used as the target for all dispatched skill sessions (see Agent Spawning Implementation below)
 - **Tool** (`agentz_dispatch`): Custom tool the orchestrator LLM calls to spawn skill-specialized agents (see Agent Spawning Implementation below)
 - **Hook** (`experimental.chat.system.transform`): Always injects the orchestrator prompt. When no session is active, injects the lean base prompt (role + complexity decision criteria). When a session is active, injects the full orchestrator state from DB.
-- **Hook** (`experimental.session.compacting`): Injects agentz state into compaction context (see Section 12)
+- **Hook** (`experimental.session.compacting`): Injects agentz state into compaction context (see Section 13)
 - **Hook** (`event`): Listens for `session.compacted` and `MessageAbortedError` events (see Sections 12, 13)
 - **Slash commands**: Management commands for session control
 
@@ -409,7 +502,7 @@ The plugin registers:
 | Command | Description |
 |---------|-------------|
 | `/agentz-status [session-id]` | Show current session status, todos, progress |
-| `/agentz-resume [session-id]` | Resume a paused or interrupted session (see Section 13) |
+| `/agentz-resume [session-id]` | Resume a paused or interrupted session (see Section 14) |
 | `/agentz-pause` | Pause current session (saves state) |
 | `/agentz-list` | List all sessions with status |
 
@@ -464,7 +557,7 @@ The `system` field in `session.prompt()` is **appended** to the agent's register
 
 The SDK also provides `session.prompt_async()` (returns `204: void`) for fire-and-forget dispatch, available for future concurrent execution support.
 
-## 10. Configuration
+## 11. Configuration
 
 ```yaml
 # .opencode/agentz.yaml (or in opencode.json under "agentz" key)
@@ -487,7 +580,7 @@ agentz:
     output_format: "markdown"
 ```
 
-## 11. Skill File Structure
+## 12. Skill File Structure
 
 Each skill file follows this template:
 
@@ -532,11 +625,13 @@ You MUST follow this output protocol:
 
 ### Completion Report (return to orchestrator)
 
-STATUS: completed|failed
+STATUS: completed|failed|needs_input
 OUTPUT: {{output_path}}
 SUMMARY: <2-5 sentences — same as Summary section above>
 RECOMMENDATIONS:
 <same as Recommendations section above>
+QUESTIONS: (only when STATUS is needs_input)
+<numbered list of questions for the user>
 
 ## Context
 You are operating as part of an Agentz orchestration session.
@@ -558,7 +653,7 @@ You are operating as part of an Agentz orchestration session.
 
 Template variables (`{{...}}`) are injected by the plugin at spawn time.
 
-## 12. Autocompact Resilience
+## 13. Autocompact Resilience
 
 OpenCode triggers autocompact when the conversation context window fills up. This compresses the conversation history into a summary, replacing the full message history. Agentz must survive this seamlessly.
 
@@ -618,7 +713,7 @@ Ensures the orchestrator always has current agentz state regardless of compactio
 
 ### Subagent Compaction
 
-Subagents spawned via `@general` run in isolated context. The parent's compaction does not affect a running child agent. When the child returns its result, the parent's post-compact context has Hook 3 re-injecting agentz state, so it knows to store the result and continue the iteration loop.
+Subagents spawned via `agentz_dispatch` run in isolated context. The parent's compaction does not affect a running child agent. When the child returns its result, the parent's post-compact context has Hook 3 re-injecting agentz state, so it knows to store the result and continue the iteration loop.
 
 ### Compaction During a Running Task
 
@@ -629,7 +724,7 @@ If compaction happens while waiting for a spawned agent to complete:
 3. The LLM sees: "Task X is running (skill: backend-developer). Await its result."
 4. When the subagent returns, the orchestrator processes the result normally
 
-## 13. Interruption & Resume
+## 14. Interruption & Resume
 
 ### Detection
 
@@ -744,19 +839,19 @@ The user interrupts (maybe accidentally, or to check status) and then wants to c
                     └────┬─────┘
                          │
                     ┌────▼─────┐
-              ┌─────┤in_progress├─────┐
-              │     └────┬─────┘     │
-              │          │           │
-         ┌────▼───┐ ┌───▼────┐ ┌───▼────────┐
-         │ failed │ │completed│ │interrupted │
-         └────────┘ └───┬────┘ └─────┬───────┘
-                        │            │
-                   ┌────▼──────┐  ┌──▼─────┐
-                   │needs_rework│  │retrying│
-                   └────┬──────┘  └──┬─────┘
-                        │            │
-                   (new rework   ┌───▼────┐
-                    todo created)│completed│
+              ┌─────┤in_progress├─────┬──────────┐
+              │     └────┬─────┘     │          │
+              │          │           │          │
+         ┌────▼───┐ ┌───▼────┐ ┌───▼────────┐ │
+         │ failed │ │completed│ │interrupted │ │
+         └────────┘ └───┬────┘ └─────┬───────┘ │
+                        │            │     ┌────▼──────┐
+                   ┌────▼──────┐  ┌──▼─────┐ │needs_input│
+                   │needs_rework│  │retrying│ └────┬──────┘
+                   └────┬──────┘  └──┬─────┘      │ user responds
+                        │            │        ┌────▼─────┐
+                   (new rework   ┌───▼────┐   │in_progress│ (resume child session)
+                    todo created)│completed│   └──────────┘
                                 └────────┘
 ```
 
