@@ -19,7 +19,7 @@ Each finding is a self-contained item with context, concern, and a suggested dir
 
 ## Critical (Blocks Implementation)
 
-### 1. [ ] Agent Spawning Mechanism Is Unspecified
+### 1. [x] Agent Spawning Mechanism Is Unspecified
 
 **Design reference:** Section 9, lines 402-409
 
@@ -32,6 +32,20 @@ This creates a fundamental question: is the orchestrator a **prompt** that instr
 **Suggested direction:** Run a spike to validate what the SDK actually supports. If programmatic spawning isn't available, the cleanest alternative is registering a custom `agentz_dispatch` tool (via the `tool` hook) that the LLM calls. The tool implementation would handle prompt construction, model selection, DB tracking, and result collection — giving the plugin full control while letting the LLM trigger dispatch naturally.
 
 **Decision:**
+
+**Approach: Single `agentz` agent + custom `agentz_dispatch` tool.**
+
+The plugin registers one agent (`agentz`, mode `"subagent"`) with a lean base prompt (identity, safety boundaries, output format expectations). Dispatch is handled by a custom `agentz_dispatch` tool registered via the plugin's `tool` hook. The orchestrator LLM calls this tool naturally to spawn skill-specific sub-sessions.
+
+Dispatch flow: the tool creates a child session via `client.session.create({ parentID })`, selects a model from tier config, composes the system prompt (protocol + skill content + task context), and calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides. It then awaits completion, validates output, updates DB, and returns the completion report.
+
+Key SDK facts verified:
+- `SessionPromptData` supports per-prompt `model`, `system`, and `tools` overrides
+- The `system` field is **appended** to the agent's registered prompt (not an override) — agent prompt first, then environment/instructions, then the `system` value
+- `SessionPromptAsyncData` provides a fire-and-forget variant for future async dispatch
+- This matches oh-my-opencode v3.2.2's `delegate_task` pattern exactly
+
+Design plan updated: Sections 5 and 9 now reflect the `agentz_dispatch` tool mechanism, replacing the previous `@general` subagent reference.
 
 ---
 

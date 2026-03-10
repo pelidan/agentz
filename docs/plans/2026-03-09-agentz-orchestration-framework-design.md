@@ -104,6 +104,18 @@ Non-leaf agents perform substantive work. They have direct tool access for simpl
 
 ## 5. Spawning Model
 
+### Mechanism
+
+All agent dispatch goes through the `agentz_dispatch` tool — a custom tool registered by the plugin via the `tool` hook. The orchestrator LLM calls this tool naturally; the tool's `execute` function handles all spawning mechanics:
+
+1. Creates a child session via `client.session.create({ parentID })`
+2. Selects a model from tier config based on skill requirements
+3. Composes the system prompt (protocol template + skill content + task context)
+4. Calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides
+5. Awaits completion, validates output, updates DB, returns completion report
+
+The plugin registers a single `agentz` agent (mode: `"subagent"`) with a lean base prompt covering identity, safety boundaries, and general output format expectations. All skill-specific instructions are injected via the `system` parameter at dispatch time — the SDK **appends** this to the agent's base prompt (agent prompt first, then environment/instructions, then the `system` value).
+
 ### Rules
 
 1. **Leaf agents** (`local-explorer`, `web-explorer`): anyone can spawn them freely — they are context compressors that never spawn children.
@@ -115,6 +127,8 @@ Non-leaf agents perform substantive work. They have direct tool access for simpl
 4. **Graceful ancestry blocking**: if a spawn is blocked by ancestry rules, the agent returns the best answer it has and lets the caller supplement with its own expertise. No hard failures.
 
 5. **Dual-mode operation**: agents have direct tool access (grep, glob, webfetch, read, write, edit, bash) for simple operations. They spawn leaf agents for exploratory or large-volume operations where context compression is needed.
+
+All depth/ancestry rules are enforced inside the `agentz_dispatch` tool's `execute` function before creating the child session.
 
 ### Depth Visualization
 
@@ -370,6 +384,8 @@ The orchestrator is the **main agent** — always active, not activated by slash
 ### Entry Point
 
 The plugin registers:
+- **Agent** (`agentz`): Single subagent with lean base prompt — used as the target for all dispatched skill sessions (see Agent Spawning Implementation below)
+- **Tool** (`agentz_dispatch`): Custom tool the orchestrator LLM calls to spawn skill-specialized agents (see Agent Spawning Implementation below)
 - **Hook** (`experimental.chat.system.transform`): Always injects the orchestrator prompt. When no session is active, injects the lean base prompt (role + complexity decision criteria). When a session is active, injects the full orchestrator state from DB.
 - **Hook** (`experimental.session.compacting`): Injects agentz state into compaction context (see Section 12)
 - **Hook** (`event`): Listens for `session.compacted` and `MessageAbortedError` events (see Sections 12, 13)
@@ -401,12 +417,52 @@ Note: There is no `/agentz <goal>` command — the orchestrator decides automati
 
 ### Agent Spawning Implementation
 
-Agents are spawned via OpenCode's `@general` subagent system. The plugin:
-1. Constructs the agent prompt: skill content + task description + relevant context refs + output path
-2. Sets the model based on tier mapping from config
-3. Tracks ancestry chain in the task's metadata
-4. Receives lightweight completion report (never the full output)
-5. Stores summary + file reference in DB
+The plugin registers a single `agentz` agent and a custom `agentz_dispatch` tool:
+
+```typescript
+// Agent registration — lean base prompt, subagent mode
+agent: {
+  agentz: {
+    model: undefined, // selected per-dispatch from tier config
+    prompt: AGENTZ_BASE_PROMPT, // identity + safety + output format expectations
+    description: "Agentz skill-specialized subagent",
+    mode: "subagent",
+  }
+}
+
+// Tool registration — the dispatch mechanism
+tool: {
+  agentz_dispatch: {
+    description: "Dispatch a skill-specialized agent for a todo item",
+    parameters: {
+      todo_id: { type: "number", description: "The todo ID to work on" },
+      skill: { type: "string", description: "The skill to use (from mapping table)" },
+    },
+    async execute(args, ctx) {
+      // 1. Validate ancestry/depth rules
+      // 2. Create child session: client.session.create({ parentID })
+      // 3. Select model from tier config
+      // 4. Compose system prompt: protocol + skill content + task context
+      // 5. Call session.prompt() with per-prompt overrides:
+      //    - agent: "agentz"
+      //    - model: { providerID, modelID }
+      //    - system: <composed skill prompt>  (appended to base agent prompt)
+      //    - tools: { ... }                   (per-session tool control)
+      //    - parts: [{ type: "text", text: <task description> }]
+      // 6. Await completion, validate output
+      // 7. Update DB: task status, output summary, recommendations
+      // 8. Return completion report to orchestrator
+    }
+  }
+}
+```
+
+The `system` field in `session.prompt()` is **appended** to the agent's registered base prompt by the OpenCode server (agent prompt first, then environment/instructions, then the `system` value). This means:
+- The `agentz` base prompt provides stable identity and universal constraints
+- Skill-specific protocol, task context, and output format go in `system` at dispatch time
+- This matches the pattern used by oh-my-opencode's `delegate_task` tool
+
+The SDK also provides `session.prompt_async()` (returns `204: void`) for fire-and-forget dispatch, available for future concurrent execution support.
 
 ## 10. Configuration
 
