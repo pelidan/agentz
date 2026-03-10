@@ -152,7 +152,7 @@ Non-leaf agents perform substantive work. They have direct tool access for simpl
 | `devops-engineer` | CI/CD, deployment, infrastructure |
 | `security-auditor` | Security review, vulnerability assessment |
 | `technical-writer` | Documentation, API docs, guides |
-| `synthesizer` | Reads all task outputs, identifies gaps/inconsistencies, consolidates review. Can add new todos, flag issues, or approve for verification. Adapts depth based on task complexity. |
+| `synthesizer` | Two-pass review: breadth scan of all task summaries, then targeted deep reads of flagged outputs. Identifies requirement gaps and cross-task inconsistencies. Can add new todos, flag issues, or approve for verification. Adapts depth based on session size and task complexity (see Section 8, Synthesizer Reading Strategy). |
 
 ## 6. Spawning Model
 
@@ -373,14 +373,14 @@ Every orchestration session automatically includes three fixed todos that run af
 | Fixed Todo | Skill | Trigger | Purpose |
 |---|---|---|---|
 | **Code Review** | `code-reviewer` | All regular todos completed AND at least one non-trivial `develop-backend`/`develop-frontend` todo exists | Reads implementation output files + actual code diffs from filesystem. Reviews for correctness, style, patterns, edge cases. May add rework todos. Skipped if the orchestrator deems all implementation trivial or if no implementation tasks exist. |
-| **Synthesize & Review** | `synthesizer` | Code Review approved (or skipped) | Reads all task output summaries. Identifies requirement gaps, cross-task inconsistencies, architectural misalignment. May add new todos or approve for verification. Does NOT re-evaluate code quality (trusts the reviewer). |
+| **Synthesize & Review** | `synthesizer` | Code Review approved (or skipped) | Two-pass review: (1) breadth scan of all task Summary sections to assess coverage and flag concerns, (2) targeted deep reads of flagged outputs for coherence analysis. Identifies requirement gaps, cross-task inconsistencies, architectural misalignment. May add new todos or approve for verification. Does NOT re-evaluate code quality (trusts the reviewer). See Section 8, Synthesizer Reading Strategy. |
 | **Verify** | `backend-tester` (or appropriate) | Synthesizer approved | Build, test, lint — concrete verification of implementation |
 
 **Reviewer / Synthesizer boundary:** The code reviewer evaluates *implementation quality* (correctness, patterns, edge cases, test coverage of implementation code). The synthesizer evaluates *project completeness* (requirement coverage, cross-task coherence, gap analysis). The synthesizer trusts that reviewer-approved code is correct and focuses exclusively on whether the right things were built and whether they fit together.
 
 **Review cycle limit:** To prevent infinite review-rework loops, the session tracks a `review_cycle` counter. After N cycles (configurable, default 2), the orchestrator escalates to the user with outstanding issues and pauses for a decision.
 
-The synthesizer uses **adaptive complexity**: for large/complex task lists it does a deep cross-referencing review and may restructure remaining work; for simple tasks it does a quick sanity check and moves straight to verification. This decision is part of the synthesizer's skill prompt.
+The synthesizer uses a **two-pass reading strategy** to stay within context limits while maintaining both breadth and depth (see Section 8, Synthesizer Reading Strategy for full details). For small sessions (< 5 tasks) the two passes are effectively the same since all outputs are read. For large sessions (15+), the two-pass approach reduces token consumption by ~60-70% compared to reading all outputs in full.
 
 ### Working View (What the Orchestrator Sees Per Iteration)
 
@@ -530,9 +530,54 @@ When a subagent needs context from a prior task's output:
 2. The subagent reads the file directly from the filesystem
 3. This keeps the orchestrator lean while giving agents access to full prior outputs
 
-### Synthesizer Access
+### Synthesizer Reading Strategy
 
-The synthesizer agent is special: it reads **all** output files for the session to build a holistic view. It receives the list of all task output paths and reads them from the filesystem, never through the orchestrator.
+The synthesizer agent needs both **breadth** (see everything) and **depth** (catch subtle issues). Reading all output files in full would exceed context limits on large sessions (a 20-task session generates 40,000–100,000 tokens of outputs). The synthesizer uses a two-pass reading strategy, instructed by its skill file — no architectural changes to the dispatch system.
+
+#### Pass 1 — Breadth Scan (All Tasks, Summaries Only)
+
+The synthesizer reads lightweight data for every task:
+- **Task completion report summaries** from DB (`tasks.output_summary`, 2–5 sentences each)
+- **The `## Summary` section** from each task's output file (first section only — all output files are required to start with `## Summary`)
+
+From this, the synthesizer builds a coverage map: which requirements are addressed, which aren't, where outputs might overlap or conflict. It then produces an explicit **deep-read target list** with reasons before proceeding to Pass 2.
+
+#### Pass 2 — Targeted Deep Reads (Selected Tasks, Full Output)
+
+The synthesizer reads full output files only for flagged tasks — typically 3–8 out of 20. Selection heuristics (encoded in the skill prompt, not programmatic):
+- Tasks that touch **shared interfaces** (API contracts, DB schemas, shared types)
+- Tasks flagged with `NEEDS_REVIEW` by any prior agent
+- Tasks in **overlapping domains** (e.g., two tasks both modifying auth)
+- The **highest-complexity task** by tier (anything that ran on `powerful`)
+
+The synthesizer performs coherence analysis on selected outputs: contract consistency, error handling patterns, assumption alignment, naming conventions, missing integration points.
+
+#### Token Budget (Two-Pass vs. Full Read)
+
+For a 20-task session (outputs averaging 4,000 tokens each):
+
+| Component | Full Read (old) | Two-Pass |
+|---|---|---|
+| All outputs in full | ~80,000 | — |
+| All summaries (DB + output `## Summary`) | — | ~6,000 |
+| Deep reads (~5 selected outputs) | — | ~20,000 |
+| Overhead (system prompt, skill, task prompt) | ~3,000 | ~3,000 |
+| **Total** | **~83,000** | **~29,000** |
+
+Comfortably within 128K context. Even a 40-task session stays under 50K with this approach.
+
+#### Output `## Summary` Section Requirement
+
+All agent output files **must** start with a `## Summary` section. This is a hard requirement across all skills, not optional. The Summary section must be:
+- **Self-contained**: understandable without reading the rest of the file
+- **Concise**: 2–5 sentences covering what was done, key decisions, and notable findings
+- **Consistent**: matches the SUMMARY field in the completion report
+
+This convention enables the synthesizer's breadth scan to work reliably — it reads only this section during Pass 1. The skill file template (Section 12) enforces this as the first section of every output file.
+
+#### Future Improvement: Mid-Session Synthesis Checkpoint
+
+Not in v1 scope. For sessions with 10+ todos, a single synthesis checkpoint at the ~50% mark could catch major coherence issues early — before downstream tasks build on flawed assumptions. This would require a minor orchestrator loop change (insert a conditional mini-synthesis step after roughly half the regular todos are complete). Noted as a v2 enhancement.
 
 ## 9. Persistence Schema
 
@@ -819,8 +864,10 @@ You MUST follow this output protocol:
 
 ### Full Output File (write to {{output_path}})
 
+**IMPORTANT:** The `## Summary` section MUST be the first section in every output file. The synthesizer's breadth scan reads only this section during its first pass — it must be self-contained and understandable without the rest of the file.
+
 ## Summary
-<2-5 sentence summary>
+<2-5 sentence summary — self-contained, covers what was done, key decisions, notable findings>
 
 ## Details
 <Full work output — can be arbitrarily long>

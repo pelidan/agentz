@@ -192,7 +192,7 @@ Design plan updated: Section 7 (Orchestrator Design) gains "Working View" subsec
 
 ---
 
-### 5. [ ] Synthesizer Context Overflow on Large Sessions
+### 5. [x] Synthesizer Context Overflow on Large Sessions
 
 **Design reference:** Section 5 (synthesizer role), Section 8 (synthesizer access)
 
@@ -207,6 +207,22 @@ Design plan updated: Section 7 (Orchestrator Design) gains "Working View" subsec
 - Consider running the synthesizer on the `powerful` tier for large sessions regardless of the default mapping
 
 **Decision:**
+
+**Approach: Two-Pass Synthesizer — Breadth-First, Then Targeted Depth.**
+
+The synthesizer works in two explicit phases, instructed by its skill file. No architectural changes to the dispatch system or orchestrator loop.
+
+**Pass 1 — Breadth Scan:** Reads every task's completion report summary (from DB) and the `## Summary` section from each output file. Builds a coverage map and produces an explicit deep-read target list with reasons before proceeding to Pass 2.
+
+**Pass 2 — Targeted Deep Reads:** Reads full output files only for flagged tasks — typically 3–8 out of 20. Selection heuristics encoded in the skill prompt: tasks touching shared interfaces, tasks flagged with `NEEDS_REVIEW`, tasks in overlapping domains, highest-complexity tasks by tier.
+
+**Token budget (20-task session):** ~29,000 tokens (two-pass) vs ~83,000 (full read). Comfortably within 128K context. Even a 40-task session stays under 50K.
+
+**Key convention enforced:** All agent output files must start with a `## Summary` section — self-contained, 2–5 sentences, understandable without the rest of the file. This enables the breadth scan. Made an explicit hard requirement in Section 12 (Skill File Structure).
+
+**Future improvement (v2):** Mid-session synthesis checkpoint for sessions with 10+ todos — a single synthesis step at the ~50% mark to catch coherence issues before downstream tasks build on flawed assumptions. Not in v1 scope.
+
+Design plan updated: Section 5 (Agent Taxonomy) synthesizer description updated. Section 7 (Orchestrator Design) Fixed Todo Items table and synthesizer paragraph updated. Section 8 (Communication Protocol) "Synthesizer Access" replaced with "Synthesizer Reading Strategy" subsection containing two-pass mechanics, token budget table, `## Summary` requirement, and future improvement note. Section 12 (Skill File Structure) output template updated with explicit `## Summary` requirement and rationale.
 
 ---
 
