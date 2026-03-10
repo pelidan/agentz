@@ -102,7 +102,7 @@ Design plan updated: New Section 2 (Superpowers Coexistence Strategy) added. Sec
 
 ## High Priority (Significant Design Gaps)
 
-### 3. [ ] No Task Failure / Retry Strategy
+### 3. [x] No Task Failure / Retry Strategy
 
 **Design reference:** Section 7 (iteration loop), Section 14 (interruption only)
 
@@ -125,6 +125,25 @@ The task state diagram (Section 14) shows `failed` as a terminal state with no o
 - Add a `retries` counter to the `tasks` table
 
 **Decision:**
+
+**Approach: Smart Escalation Ladder inside `agentz_dispatch`.**
+
+All retry logic lives inside the `agentz_dispatch` tool's `execute` function — the orchestrator never sees retries, only the final outcome. Each task gets at most 3 attempts with a fixed escalation sequence where each step changes exactly one variable for debuggability.
+
+**Failure classification:** On failure, the dispatch tool classifies the error programmatically (not via LLM judgment):
+- `transient` — timeout, abort, network error → retry same config first, then escalate tier
+- `capability` — no completion report, missing output file, context limit → skip to tier escalation
+- `systematic` — agent explicitly returned `STATUS: failed` with error message → surface to user immediately, no retries
+
+**Tier escalation:** Each tier has a configurable `escalate_to` field (e.g., `fast-cheap → balanced → powerful → null`). When escalation is needed, the dispatch tool follows the chain. If `escalate_to` is `null`, the escalation step is skipped and the failure is surfaced to the user.
+
+**User surface mechanism:** When the ladder is exhausted, the dispatch tool returns a structured failure report (STATUS, ERROR_TYPE, ERROR_DETAIL, ATTEMPTS, TIERS_TRIED). The orchestrator relays this to the user and pauses iteration — same flow as `needs_input`. User can retry, skip (cancel the todo), or rephrase the task.
+
+**Schema changes:** The `tasks` table gains `retries` (INTEGER), `final_tier` (TEXT), `failure_classification` (TEXT), and `error_detail` (TEXT) fields.
+
+**State diagram update:** `failed` is no longer terminal — it transitions to `pending` (user chose retry/rephrase, new task created) or stays `failed` with the todo cancelled (user chose skip).
+
+Design plan updated: Section 4 (Tier System) gains Tier Escalation subsection with `escalate_to` config. Section 6 (Spawning Model) gains Failure Handling & Escalation Ladder subsection with classification table, ladder diagram, failure report format, and v1 scope boundaries. Section 7 (Iteration Loop) step 4 gains failure branch (step 4g). Section 8 (Communication Protocol) gains failure report format alongside completion report. Section 9 (Persistence Schema) `tasks` table gains `retries`, `final_tier`, `failure_classification`, `error_detail` fields. Section 11 (Configuration) tier config expanded to object format with `model` and `escalate_to`. Section 14 (Task States) diagram and transitions updated with recovery paths from `failed`.
 
 ---
 

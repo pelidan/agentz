@@ -87,6 +87,19 @@ Semantic tier tags abstracted from concrete models. Users map tiers to models in
 
 **No cost multiplier in tier definition** — that's a config-time decision by the user.
 
+### Tier Escalation
+
+Each tier has an optional `escalate_to` field pointing to the next tier to try when a task fails due to insufficient model capability. The `agentz_dispatch` tool follows this chain during failure recovery (see Section 6, Failure Handling).
+
+| Tier | Default `escalate_to` |
+|------|----------------------|
+| `fast-cheap` | `balanced` |
+| `balanced` | `powerful` |
+| `powerful` | `null` (no escalation — surface to user) |
+| `reasoning` | `null` (no escalation — surface to user) |
+
+Users can reconfigure the escalation path per tier. If `escalate_to` is `null` or absent, model escalation is skipped and the failure is surfaced to the user directly.
+
 ### Default Mapping Table
 
 The orchestrator sees this table in its prompt as a reference frame. It follows the table by default but can override with justification.
@@ -151,7 +164,8 @@ All agent dispatch goes through the `agentz_dispatch` tool — a custom tool reg
 2. Selects a model from tier config based on skill requirements
 3. Composes the system prompt (protocol template + skill content + task context)
 4. Calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides
-5. Awaits completion, validates output, updates DB, returns completion report
+5. Validates output and runs the escalation ladder on failure (see Failure Handling below)
+6. Updates DB (including retry metadata), returns completion or failure report
 
 The plugin registers a single `agentz` agent (mode: `"subagent"`) with a lean base prompt covering identity, safety boundaries, and general output format expectations. All skill-specific instructions are injected via the `system` parameter at dispatch time — the SDK **appends** this to the agent's base prompt (agent prompt first, then environment/instructions, then the `system` value).
 
@@ -168,6 +182,65 @@ The plugin registers a single `agentz` agent (mode: `"subagent"`) with a lean ba
 5. **Dual-mode operation**: agents have direct tool access (grep, glob, webfetch, read, write, edit, bash) for simple operations. They spawn leaf agents for exploratory or large-volume operations where context compression is needed.
 
 All depth/ancestry rules are enforced inside the `agentz_dispatch` tool's `execute` function before creating the child session.
+
+### Failure Handling & Escalation Ladder
+
+All retry logic lives inside `agentz_dispatch`'s `execute` function. The orchestrator LLM never sees retries — only the final outcome (success or exhausted-failure). Each task gets at most 3 attempts.
+
+#### Failure Classification
+
+When `session.prompt()` fails or returns an invalid result, the dispatch tool classifies the failure before deciding which ladder step to apply:
+
+| Signal | Classification | Rationale |
+|--------|---------------|-----------|
+| `session.prompt()` throws timeout / abort / network error | `transient` | Infrastructure issue, likely recoverable on retry |
+| `session.prompt()` returns but output has no completion report | `capability` | Model couldn't follow the protocol — needs stronger model |
+| Completion report present but output file missing at `output_path` | `capability` | Model didn't write the file — needs stronger model |
+| `STATUS: failed` with error message from agent | `systematic` | Agent explicitly reported failure — the task itself is problematic |
+| `session.prompt()` throws context limit error | `capability` | Model ran out of context — escalation to larger context window may help |
+
+#### The Ladder
+
+```
+Attempt 1: Original config (tier model + skill)
+    ↓ failure
+Classify failure → transient | capability | systematic
+    ↓
+┌─ transient ──→ Attempt 2: Same config (retry)
+│                    ↓ failure
+│                Attempt 3: Escalated tier model (via escalate_to)
+│                    ↓ failure
+│                Return failure report to orchestrator
+│
+├─ capability ─→ Attempt 2: Escalated tier model (skip same-config retry)
+│                    ↓ failure
+│                Return failure report to orchestrator
+│
+└─ systematic ─→ Return failure report to orchestrator immediately (no retries)
+```
+
+When escalation is needed, the dispatch tool looks up the current tier's `escalate_to` (see Section 4, Tier Escalation). If `escalate_to` is `null` or absent, the escalation step is skipped and the failure is returned immediately.
+
+#### Failure Report (Returned to Orchestrator on Exhausted Ladder)
+
+When retries are exhausted, the dispatch tool returns a failure report instead of a completion report:
+
+```
+STATUS: failed
+ERROR_TYPE: <transient|capability|systematic>
+ERROR_DETAIL: <what went wrong — exception message, validation error, or agent's error message>
+ATTEMPTS: <number of attempts made, including original>
+TIERS_TRIED: <comma-separated list of tiers attempted>
+ORIGINAL_TASK: <the task description>
+```
+
+The orchestrator treats this similarly to `needs_input` — it relays the failure info to the user and pauses iteration awaiting a decision. See Section 7 (Iteration Loop, step 4g) for how the orchestrator processes this.
+
+#### What This Doesn't Handle (Out of Scope for v1)
+
+- **Wrong skill assignment** — If a task fails because it was assigned the wrong skill, the user will see it at the surface-to-user step and can rephrase. Automatic re-routing is a v2 concern.
+- **Partial output recovery** — If a subagent wrote partial output before failing, this design discards it and retries from scratch. Incremental recovery is not worth the complexity for v1.
+- **Cost budgets** — The design records `retries` and `final_tier` for visibility, but does not enforce cost limits. Cost tracking is a separate concern.
 
 ### Depth Visualization
 
@@ -272,8 +345,13 @@ Each iteration starts with **clean context** loaded from DB only:
    d. Agent writes full output to .agentz/sessions/<id>/<task>/output.md directly
    e. Agent returns completion report to orchestrator: file reference, short summary, status, recommendations
    f. If STATUS is needs_input: store questions in DB, surface to user, pause iteration (go to 2)
-   g. Orchestrator stores summary + file reference in DB (never sees full output)
-   h. Process agent recommendations (new todos, notes)
+   g. If STATUS is failed (ladder exhausted — see Section 6, Failure Handling):
+      - Store failure report in DB (error_type, error_detail, retries, tiers_tried)
+      - Relay failure info to user with context (what failed, why, what was tried)
+      - Pause iteration awaiting user decision (same flow as needs_input)
+      - User may: retry (re-dispatch same config), skip (cancel todo), or rephrase the task
+   h. Orchestrator stores summary + file reference in DB (never sees full output)
+   i. Process agent recommendations (new todos, notes)
 5. Write iteration summary to DB
 6. Next iteration (go to 1)
 ```
@@ -375,6 +453,17 @@ QUESTIONS: (only when STATUS is needs_input)
 - <question 2>
 ```
 
+Note: When `STATUS: failed` is returned by an agent, the orchestrator only sees it if the escalation ladder in `agentz_dispatch` has been exhausted (see Section 6, Failure Handling). The dispatch tool may have already retried the task 1-2 times transparently before surfacing the failure. The failure report format returned by the dispatch tool is:
+
+```
+STATUS: failed
+ERROR_TYPE: <transient|capability|systematic>
+ERROR_DETAIL: <what went wrong>
+ATTEMPTS: <total attempts including original>
+TIERS_TRIED: <comma-separated tiers attempted>
+ORIGINAL_TASK: <the task description>
+```
+
 The `Details` and `Artifacts` sections stay in the output file only — they never travel through the orchestrator's context. Subsequent agents that need deep context from a prior task read the output file directly from the filesystem.
 
 ### Cross-Agent Context
@@ -423,8 +512,12 @@ CREATE TABLE tasks (
   session_id TEXT NOT NULL REFERENCES sessions(id),
   todo_id INTEGER REFERENCES todos(id),
   skill TEXT NOT NULL, -- agent skill used
-  tier TEXT NOT NULL, -- tier used
+  tier TEXT NOT NULL, -- tier originally assigned
+  final_tier TEXT, -- tier that produced the final result (may differ from tier if escalated)
   status TEXT NOT NULL DEFAULT 'pending', -- pending, running, completed, failed, interrupted, needs_input
+  retries INTEGER NOT NULL DEFAULT 0, -- number of retry attempts made by escalation ladder
+  failure_classification TEXT, -- transient, capability, systematic, or null if no failure
+  error_detail TEXT, -- error message / diagnostic info from the failure
   input_summary TEXT, -- what was asked
   output_summary TEXT, -- compressed result
   output_path TEXT, -- filesystem path to full output
@@ -542,9 +635,16 @@ tool: {
       //    - system: <composed skill prompt>  (appended to base agent prompt)
       //    - tools: { ... }                   (per-session tool control)
       //    - parts: [{ type: "text", text: <task description> }]
-      // 6. Await completion, validate output
-      // 7. Update DB: task status, output summary, recommendations
-      // 8. Return completion report to orchestrator
+      // 6. Validate output (completion report present, output file exists)
+      //    - On success: update DB, return completion report
+      //    - On failure: classify error (transient/capability/systematic),
+      //      run escalation ladder (see Section 6, Failure Handling):
+      //      a. transient → retry same config, then escalate tier, then fail
+      //      b. capability → escalate tier (skip same-config retry), then fail
+      //      c. systematic → fail immediately (no retries)
+      //      Escalation uses tier's escalate_to config (Section 4)
+      // 7. Update DB: task status, retries, final_tier, error_detail
+      // 8. Return completion report (or failure report) to orchestrator
     }
   }
 }
@@ -563,10 +663,18 @@ The SDK also provides `session.prompt_async()` (returns `204: void`) for fire-an
 # .opencode/agentz.yaml (or in opencode.json under "agentz" key)
 agentz:
   tiers:
-    fast-cheap: "haiku"
-    balanced: "sonnet"
-    powerful: "opus"
-    reasoning: "o3"
+    fast-cheap:
+      model: "haiku"
+      escalate_to: "balanced"
+    balanced:
+      model: "sonnet"
+      escalate_to: "powerful"
+    powerful:
+      model: "opus"
+      escalate_to: null  # no further escalation — surface to user
+    reasoning:
+      model: "o3"
+      escalate_to: null
 
   # Override default mapping for specific categories
   mapping_overrides:
@@ -833,6 +941,8 @@ The user interrupts (maybe accidentally, or to check status) and then wants to c
 
 ### Task States
 
+Note: The `failed` state shown here is the **terminal** failure — when the escalation ladder in `agentz_dispatch` has been exhausted (see Section 6, Failure Handling). Transient and capability retries happen transparently inside the dispatch tool and are not visible in the state diagram. The `retries` and `final_tier` fields on the `tasks` table record what happened internally.
+
 ```
                     ┌──────────┐
                     │ pending  │
@@ -865,3 +975,12 @@ The user interrupts (maybe accidentally, or to check status) and then wants to c
 | `cancelled` | No longer needed (superseded or removed) |
 | `interrupted` | Was in progress when user interrupted |
 | `needs_rework` | Was completed, but subsequent change request invalidates it |
+
+State transitions:
+- `pending` → `in_progress`
+- `in_progress` → `failed` | `completed` | `interrupted` | `needs_input`
+- `failed` → `pending` (user chose retry/rephrase — new task created) | stays `failed` (user chose skip — todo cancelled)
+- `interrupted` → `retrying` → `completed`
+- `needs_input` → `in_progress` (when user responds, resume child session)
+- `completed` → `needs_rework` (when a subsequent change request invalidates it)
+- `needs_rework` triggers creation of a new rework todo
