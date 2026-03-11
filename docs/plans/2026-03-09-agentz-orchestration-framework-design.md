@@ -27,7 +27,7 @@ The combined token cost (superpowers bootstrap ~800-1000 tokens + agentz state 3
 
 ### Injection Conflict Resolution
 
-Agentz's `chat.system.transform` hook suppresses superpowers' injection when the agentz plugin is active. Implementation: when both plugins are loaded, agentz filters superpowers' content from `output.system` after both hooks have run, or superpowers checks for an agentz-active flag and skips injection.
+The primary agent model (see Section 10) simplifies coexistence: agentz's `chat.system.transform` hook only injects orchestrator state when the active agent is `agentz`. When the user switches to a different agent (e.g., OpenCode's default), the agentz hook injects nothing — so superpowers (if loaded) can run without conflict. During development, both plugins can coexist: superpowers governs non-agentz agents, agentz governs the `agentz` agent. Once agentz handles the full workflow spectrum, superpowers is retired.
 
 ### Porting Superpowers Disciplines
 
@@ -45,7 +45,7 @@ The `using-superpowers` meta-skill concept (invoke skills before acting) is reti
 
 ### Migration Path
 
-During development, superpowers can remain active for non-agentz OpenCode sessions. Once agentz handles the full workflow spectrum, the superpowers plugin is retired.
+During development, both plugins coexist naturally: the user switches to the `agentz` primary agent for orchestrated work (superpowers is not injected), and switches to OpenCode's default agent for superpowers-governed work (agentz is not injected). Once agentz handles the full workflow spectrum, the superpowers plugin is retired.
 
 ## 3. Three-Layer Architecture
 
@@ -175,7 +175,7 @@ All agent dispatch goes through the `agentz_dispatch` tool — a custom tool reg
 10. Syncs agentz todos to OpenCode's sidebar (see Section 6, Sidebar Todo Sync)
 11. Constructs and returns a domain-free structured report to the orchestrator (see Section 8, Structured Orchestrator Report)
 
-The plugin registers a single `agentz` agent (mode: `"subagent"`) with a lean base prompt covering identity, safety boundaries, and general output format expectations. All skill-specific instructions are injected via the `system` parameter at dispatch time — the SDK **appends** this to the agent's base prompt (agent prompt first, then environment/instructions, then the `system` value).
+The plugin registers an `agentz-worker` agent (mode: `"subagent"`) with a lean base prompt covering identity, safety boundaries, and general output format expectations. All skill-specific instructions are injected via the `system` parameter at dispatch time — the SDK **appends** this to the agent's base prompt (agent prompt first, then environment/instructions, then the `system` value).
 
 ### Rules
 
@@ -326,7 +326,7 @@ Orchestrator
 
 ## 7. Orchestrator Design
 
-The orchestrator is the **main agent** — always active, injected into every conversation via the system prompt hook. It is a **pure task processor** that never accumulates large outputs in its context. It does NOT brainstorm or analyze business/technology concerns itself; those are delegated to specialist agents.
+The orchestrator is a **primary agent** — activated by switching to the `agentz` agent in the TUI (via the agent cycle command). When active, the orchestrator prompt and working view are injected into every LLM call. When the user switches to a different agent, agentz injects nothing — the orchestrator is effectively paused. The orchestrator is a **pure task processor** that never accumulates large outputs in its context. It does NOT brainstorm or analyze business/technology concerns itself; those are delegated to specialist agents.
 
 ### Complexity Decision
 
@@ -491,9 +491,11 @@ The orchestrator state is injected into every LLM call via the system prompt hoo
 | **Notes** | Always show all | Notes are the cross-iteration memory that compensates for pruning other sections. Quality enforced via skill prompts (see Section 12), not view pruning. |
 | **Task summaries** | Last completed task + any currently running task | Most recent result informs the next dispatch; older results are queryable |
 
-#### Why Always Inject (No Intent Detection)
+#### Why Always Inject When Active (No Intent Detection)
 
-The working view is injected on every LLM call — including non-orchestration queries (user asks a quick question mid-session). Rather than trying to classify whether a message is "orchestration-related" (fragile, ambiguous edge cases), the working view is kept compact enough (~800-1,300 tokens) that the overhead is negligible even when not needed. This eliminates the classification problem entirely.
+When the `agentz` agent is active, the working view is injected on every LLM call — including non-orchestration queries (user asks a quick question mid-session). Rather than trying to classify whether a message is "orchestration-related" (fragile, ambiguous edge cases), the working view is kept compact enough (~800-1,300 tokens) that the overhead is negligible even when not needed. This eliminates the classification problem entirely.
+
+When the user switches to a different agent, the hook injects nothing — no overhead, no conflict with other plugins.
 
 #### Token Budget Estimate (Large Session: 50 Todos, 30 Iterations, 20 Notes)
 
@@ -887,9 +889,9 @@ The filesystem layer (`.agentz/sessions/<id>/<task-id>/output.md`) is **independ
 
 ## 10. Plugin Integration
 
-### Always-On Orchestrator
+### Primary Agent Orchestrator
 
-The orchestrator is the **main agent** — always active, not activated by slash commands. Like oh-my-opencode-slim's phase-reminder, the orchestrator prompt is injected into every conversation via the system prompt hook.
+The orchestrator is a **primary agent** — activated by the user switching to the `agentz` agent in the TUI (via the agent cycle command). When the user is on a different agent, the agentz plugin injects nothing into the system prompt. This eliminates the "always-on annoyance" problem: the orchestrator only runs when the user explicitly opts in.
 
 ### Entry Point
 
@@ -901,16 +903,28 @@ The orchestrator is the **main agent** — always active, not activated by slash
 5. Register agent, tools, hooks, and slash commands (below)
 
 The plugin registers:
-- **Agent** (`agentz`): Single subagent with lean base prompt — used as the target for all dispatched skill sessions (see Agent Spawning Implementation below)
-- **Tool** (`agentz_dispatch`): Custom tool the orchestrator LLM calls to spawn skill-specialized agents (see Agent Spawning Implementation below)
-- **Tool** (`agentz_query`): On-demand state query tool for accessing data pruned from the working view (see Section 7, Working View)
-- **Hook** (`experimental.chat.system.transform`): Always injects the orchestrator prompt. When no session is active, injects the lean base prompt (role + complexity decision criteria). When a session is active, injects the working view from DB (see Section 7, Working View).
+- **Agent** (`agentz`): Primary agent with orchestrator base prompt — the user switches to this agent to activate orchestration. Registered with `mode: "primary"` so it appears in the TUI agent cycle.
+- **Agent** (`agentz-worker`): Subagent with lean base prompt — used as the target for all dispatched skill sessions (see Agent Spawning Implementation below). Registered with `mode: "subagent"`.
+- **Tool** (`agentz_dispatch`): Custom tool the orchestrator LLM calls to spawn skill-specialized agents (see Agent Spawning Implementation below). Gated to the `agentz` agent via `permission`.
+- **Tool** (`agentz_query`): On-demand state query tool for accessing data pruned from the working view (see Section 7, Working View). Gated to the `agentz` agent via `permission`.
+- **Hook** (`experimental.chat.system.transform`): Scoped to the `agentz` agent via agent-identity tracking (see below). When the `agentz` agent is active and a session exists, injects the working view from DB. When the `agentz` agent is active with no session, injects the lean base prompt (complexity decision criteria). When a different agent is active, injects nothing.
+- **Hook** (`chat.message`): Tracks active agent per session into an in-memory `Map<sessionID, agentName>` for use by other hooks that lack agent identity in their input.
 - **Hook** (`experimental.session.compacting`): Injects agentz state into compaction context (see Section 13)
-- **Hook** (`event`): Listens for `session.compacted` and `MessageAbortedError` events (see Sections 12, 13)
+- **Hook** (`event`): Listens for `session.compacted` and `MessageAbortedError` events (see Sections 13, 14)
 - **Slash commands**: Management commands for session control
 
 ```typescript
+// Agent-identity tracking (in-memory)
+const sessionAgentMap = new Map<string, string>();
+
+"chat.message": async ({ sessionID, agent }) => {
+  sessionAgentMap.set(sessionID, agent);
+}
+
 "experimental.chat.system.transform": async ({ sessionID }, output) => {
+  const activeAgent = sessionAgentMap.get(sessionID);
+  if (activeAgent !== "agentz") return; // Not on agentz agent — inject nothing
+
   const session = db.getActiveSessionByOpenCodeId(sessionID);
   if (session) {
     // Working view: goal, incomplete todos, completed count, last 3 iterations, all notes, last task
@@ -926,12 +940,13 @@ The plugin registers:
 
 | Command | Description |
 |---------|-------------|
+| `/agentz start <goal>` | Explicitly start an orchestration session for the given goal. Creates the DB session, switches to the `agentz` agent if not already active, and begins the iteration loop. Can be invoked from any agent. |
 | `/agentz-status [session-id]` | Show current session status, todos, progress, recent activity, and notes (see /agentz-status Output Format below) |
 | `/agentz-resume [session-id]` | Resume a paused or interrupted session (see Section 14) |
 | `/agentz-pause` | Pause current session (saves state) |
 | `/agentz-list` | List all sessions with status |
 
-Note: There is no `/agentz <goal>` command — the orchestrator decides automatically whether to create a session based on task complexity. The user simply talks naturally.
+The user can also start orchestration implicitly by switching to the `agentz` agent and stating their goal — the orchestrator's complexity decision determines whether to create a session.
 
 ### `/agentz-status` Output Format
 
@@ -976,15 +991,24 @@ Started: 12 min ago | Iteration: 5 | Status: running
 
 ### Agent Spawning Implementation
 
-The plugin registers a single `agentz` agent, the `agentz_dispatch` tool, and the `agentz_query` tool:
+The plugin registers the `agentz` primary agent, the `agentz-worker` subagent, the `agentz_dispatch` tool, and the `agentz_query` tool:
 
 ```typescript
-// Agent registration — lean base prompt, subagent mode
+// Agent registration — two agents
 agent: {
   agentz: {
+    model: undefined, // uses whatever model the user has configured
+    prompt: AGENTZ_ORCHESTRATOR_PROMPT, // orchestrator role + complexity decision + iteration behavior
+    description: "Agentz orchestrator — multi-agent task orchestration",
+    mode: "primary", // appears in TUI agent cycle
+    permission: {
+      allow: ["agentz_dispatch", "agentz_query"], // orchestrator-only tools
+    },
+  },
+  "agentz-worker": {
     model: undefined, // selected per-dispatch from tier config
-    prompt: AGENTZ_BASE_PROMPT, // identity + safety + output format expectations
-    description: "Agentz skill-specialized subagent",
+    prompt: AGENTZ_WORKER_BASE_PROMPT, // identity + safety + output format expectations
+    description: "Agentz skill-specialized worker subagent",
     mode: "subagent",
   }
 }
@@ -1006,7 +1030,7 @@ tool: {
       //    const system = renderProtocol() + loadSkill(skill) + renderTaskContext(task)
       //    See Section 12 (Protocol & Skill Architecture) for renderer details
       // 5. Call session.prompt() with per-prompt overrides:
-      //    - agent: "agentz"
+      //    - agent: "agentz-worker"
       //    - model: { providerID, modelID }
       //    - system: <composed prompt>  (appended to base agent prompt)
       //    - tools: { ... }             (per-session tool control)
@@ -1067,7 +1091,7 @@ tool: {
 ```
 
 The `system` field in `session.prompt()` is **appended** to the agent's registered base prompt by the OpenCode server (agent prompt first, then environment/instructions, then the `system` value). This means:
-- The `agentz` base prompt provides stable identity and universal constraints
+- The `agentz-worker` base prompt provides stable identity and universal constraints
 - Skill-specific protocol, task context, and output format go in `system` at dispatch time
 - This matches the pattern used by oh-my-opencode's `delegate_task` tool
 
@@ -1422,7 +1446,7 @@ OpenCode triggers autocompact when the conversation context window fills up. Thi
 
 The orchestrator already loads state from DB each iteration, not from conversation history. Autocompact destroys conversation context, but our source of truth is the database. The main risk is: the LLM loses awareness that it's in an agentz session and doesn't know what to do next.
 
-### Three-Hook Strategy
+### Four-Hook Strategy
 
 #### Hook 1: `experimental.session.compacting` — Before Compaction
 
@@ -1460,10 +1484,13 @@ Detects that compaction occurred. The next LLM call will have the enriched summa
 
 #### Hook 3: `experimental.chat.system.transform` — Every LLM Call
 
-Ensures the orchestrator always has current agentz state regardless of compaction. Uses the working view (Section 7) to keep injected state compact.
+Ensures the orchestrator always has current agentz state regardless of compaction. Scoped to the `agentz` agent via agent-identity tracking (see Section 10). Uses the working view (Section 7) to keep injected state compact.
 
 ```typescript
 "experimental.chat.system.transform": async ({ sessionID }, output) => {
+  const activeAgent = sessionAgentMap.get(sessionID);
+  if (activeAgent !== "agentz") return; // Not on agentz agent — inject nothing
+
   const session = db.getActiveSessionByOpenCodeId(sessionID);
   if (!session) return;
   output.system.push(buildWorkingView(session));
@@ -1471,6 +1498,33 @@ Ensures the orchestrator always has current agentz state regardless of compactio
   // goal, incomplete todos + completed count, last 3 iterations, all notes, last task
 }
 ```
+
+#### Hook 4: `event` — Post-Compaction Hardening (`session.compacted`)
+
+Belt-and-suspenders against weak compaction models that might drop the orchestration context from Hook 1's enrichment. When compaction occurs and the active agent is `agentz`, the plugin injects a one-shot synthetic user message to explicitly re-establish orchestration awareness.
+
+```typescript
+"event": async ({ event }) => {
+  if (event.type === "session.compacted") {
+    const sessionID = event.properties.sessionID;
+    const activeAgent = sessionAgentMap.get(sessionID);
+    if (activeAgent !== "agentz") return; // Not on agentz agent — no hardening needed
+
+    const session = db.getActiveSessionByOpenCodeId(sessionID);
+    if (!session) return;
+
+    // Inject synthetic user message via chat.message hook to nudge the LLM
+    // back into orchestration mode. Hook 3 will inject the full working view
+    // on the next LLM call; this message ensures the LLM knows to use it.
+    await client.chat.message({
+      sessionID,
+      parts: [{ type: "text", text: "[System: Compaction occurred. Resume orchestration from DB state.]" }],
+    });
+  }
+}
+```
+
+**Why this matters:** Hook 1 enriches the compaction prompt so the summary preserves "agentz session active." Hook 3 re-injects the working view on every call. But if a weak compaction model produces a summary that omits orchestration awareness, the LLM might not realize it should continue the iteration loop. Hook 4's synthetic message provides an explicit nudge. In the best case (good compaction), the message is harmless. In the worst case (bad compaction), it's the difference between the orchestrator continuing and the user having to manually prompt it.
 
 ### Subagent Compaction
 
@@ -1496,7 +1550,13 @@ When the user interrupts (Escape/Ctrl+C or sends a new message while processing)
 - Session status transitions: `busy → idle`
 - Any running tool receives the `AbortSignal`
 
-The plugin detects interruption via the `event` hook and marks the running task as `interrupted` in the DB.
+When the user switches away from the `agentz` agent:
+
+- The `chat.message` hook detects the agent change (new agent name in `sessionAgentMap`)
+- The agentz session is implicitly paused — no DB status change needed, the `chat.system.transform` hook simply stops injecting the working view
+- If a task is actively running in a child session, it completes normally; the result is stored in DB but the orchestrator does not pick up the next todo until the user switches back
+
+The plugin detects explicit interruption via the `event` hook and marks the running task as `interrupted` in the DB.
 
 ```typescript
 "event": async ({ event }) => {
@@ -1570,18 +1630,41 @@ The user interrupts (maybe accidentally, or to check status) and then wants to c
 4. Sees interrupted task → retries it (re-dispatches same skill with same input)
 5. Normal iteration loop resumes
 
+### Case 3: User Switches Away (Agent Switch)
+
+The user switches to a different agent (e.g., to use OpenCode's default agent for a quick question, or to use superpowers for unrelated work).
+
+**Flow:**
+
+1. User switches away from `agentz` agent via TUI agent cycle
+2. `chat.message` hook updates `sessionAgentMap` — agentz detects it's no longer the active agent
+3. `chat.system.transform` hook stops injecting the working view (no overhead on the other agent)
+4. The agentz DB session remains `active` — no status change, no interrupted tasks
+5. If a child session task was running, it completes normally and its result is written to DB
+6. User does whatever they need on the other agent
+
+**Resumption (wait for explicit continue):**
+
+1. User switches back to the `agentz` agent via TUI agent cycle
+2. `chat.system.transform` hook re-injects the working view (state from DB)
+3. The orchestrator shows current state but **does not auto-resume** the iteration loop
+4. User must explicitly say "continue" or `/agentz-resume` to resume orchestration
+5. This prevents surprise behavior — the user chose to leave, so they choose when to come back
+
+**Why not auto-resume?** Auto-resuming on agent switch-back could be jarring: the user switches to the agentz agent to check status, and the orchestrator immediately dispatches the next task. The "wait for explicit continue" pattern respects user intent — they can inspect state, ask questions, or adjust todos before resuming.
+
 ### `/agentz-resume` Logic
 
 ```
 /agentz-resume [session-id]
 │
 ├── session-id provided
-│   └── Load and resume that session
+│   └── Switch to agentz agent (if not already active) → load and resume that session
 │
 └── no session-id
     │
     ├── Active agentz session linked to this OpenCode session?
-    │   └── Yes → auto-resume it
+    │   └── Yes → auto-resume it (if on agentz agent; switch to it if not)
     │
     └── No active session
         │
@@ -1589,7 +1672,7 @@ The user interrupts (maybe accidentally, or to check status) and then wants to c
         │   └── Ask user: "Found session '<goal>' (paused 2h ago). Resume? [Y/n]"
         │
         └── No sessions found
-            └── "No sessions to resume. Use /agentz <goal> to start one."
+            └── "No sessions to resume. Use /agentz start <goal> to start one."
 ```
 
 ### Task States

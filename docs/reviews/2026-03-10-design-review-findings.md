@@ -488,9 +488,9 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 
 ## Lower Priority (Nice-to-Haves & Edge Cases)
 
-### 12. [ ] "Always-On" Orchestrator May Annoy Users
+### 12. [x] "Always-On" Orchestrator May Annoy Users
 
-**Design reference:** Section 7 (complexity decision), Section 10 (always-on)
+**Design reference:** Section 7 (complexity decision), Section 10 (primary agent orchestrator)
 
 **Concern:** The orchestrator is injected into every conversation. It makes a subjective "complexity decision" on every user request. Users might find it frustrating if:
 - The orchestrator creates a session for something the user considers simple
@@ -503,7 +503,19 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 - Keep the auto-detection as the default but make the threshold configurable
 - Consider a confirmation step: "This looks complex — should I create an orchestration session? [Y/n]"
 
-**Decision:**
+**Decision:** Orchestrator as primary agent with explicit activation.
+
+- The `agentz` agent is registered with `mode: "primary"` so it appears in the TUI agent cycle. The orchestrator is only active when the user switches to this agent — no injection into other agents' conversations.
+- A separate `agentz-worker` agent (`mode: "subagent"`) handles dispatched skill sessions (renamed from the old `agentz` subagent).
+- `chat.system.transform` is scoped via agent-identity tracking (`chat.message` hook → `Map<sessionID, agentName>`). Only injects the working view when the active agent is `agentz`.
+- Session start: user switches to `agentz` agent and states goal (complexity decision runs), OR `/agentz start <goal>` from any agent (creates DB session + switches to agentz agent).
+- Session pause: implicit on agent switch-away (session stays `active` in DB, no injection). Explicit via `/agentz-pause`.
+- Session resume: requires explicit user input ("continue" or `/agentz-resume`) — no auto-resume on switch-back. This prevents surprise behavior.
+- Post-compaction hardening (Hook 4): on `session.compacted` event, if active agent is `agentz`, inject synthetic user message `"[System: Compaction occurred. Resume orchestration from DB state.]"` as belt-and-suspenders against weak compaction models.
+- Clean-context-per-iteration fully preserved — `buildWorkingView()` still reads from DB, child sessions still isolated, autocompact hooks still global.
+- Superpowers coexistence simplified: no injection conflict when user is on a non-agentz agent (both plugins coexist naturally during development).
+
+**Design plan changes:** Section 2 (Injection Conflict Resolution) updated for natural coexistence via agent scoping. Section 7 (Orchestrator Design) updated: orchestrator is a primary agent, not always-on; "Why Always Inject" scoped to when the agentz agent is active. Section 10 (Plugin Integration) updated: "Always-On Orchestrator" replaced with "Primary Agent Orchestrator"; two-agent registration (agentz primary + agentz-worker subagent); `chat.message` hook for agent tracking; `chat.system.transform` scoped by agent identity; `/agentz start <goal>` slash command added. Section 13 (Autocompact Resilience) updated: three-hook strategy becomes four-hook with Hook 4 post-compaction hardening; Hook 3 scoped by agent identity. Section 14 (Interruption & Resume) updated: agent switch added as implicit pause trigger (Case 3) with "wait for explicit continue" semantics; `/agentz-resume` logic updated to handle agent switching.
 
 ---
 
