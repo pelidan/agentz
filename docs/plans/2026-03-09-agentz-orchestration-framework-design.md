@@ -59,10 +59,11 @@ During development, superpowers can remain active for non-agentz OpenCode sessio
 └──────────────┬──────────────────────┘
                │ loads & injects
 ┌──────────────▼──────────────────────┐
-│  Layer 2: Skills (.md files)            │
-│  - Orchestrator skill                    │
-│  - 15 agent skills (2 leaf, 13 non-leaf) │
+│  Layer 2: Protocol & Skills              │
+│  - Shared protocol (types.ts → prose)    │
+│  - 15 domain skills (.md, behavior only) │
 │  - Mapping table (task→tier+skill)       │
+│  - Prompt renderer & output validator    │
 └──────────────┬──────────────────────┘
                │ reads/writes
 ┌──────────────▼──────────────────────┐
@@ -165,9 +166,9 @@ All agent dispatch goes through the `agentz_dispatch` tool — a custom tool reg
 1. Creates a child session via `client.session.create({ parentID })`
 2. Selects a model from tier config based on skill requirements
 3. Publishes live status via `ctx.metadata()` (see Section 6, User Visibility During Dispatch)
-4. Composes the system prompt (protocol template + skill content + task context)
+4. Composes the system prompt via `renderProtocol()` + `loadSkill()` + `renderTaskContext()` (see Section 12, Protocol & Skill Architecture)
 5. Calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides
-6. Validates output and runs the escalation ladder on failure (see Failure Handling below)
+6. Validates output via `validateCompletionReport()` (see Section 12, Validator) and runs the escalation ladder on failure (see Failure Handling below)
 7. Updates DB (including retry metadata)
 8. Syncs agentz todos to OpenCode's sidebar (see Section 6, Sidebar Todo Sync)
 9. Returns completion or failure report
@@ -565,7 +566,7 @@ Subagents write their full output directly to the filesystem. The orchestrator *
 
 ### Full Output File (Written by Subagent)
 
-Written to `.agentz/sessions/<session>/<task>/output.md`:
+Written to `.agentz/sessions/<session>/<task>/output.md`. The required sections and their semantics are defined by the `OutputFile` type in Section 12 (Protocol & Skill Architecture). The prose format rendered into each agent's prompt is:
 
 ```markdown
 ## Summary
@@ -585,7 +586,7 @@ Written to `.agentz/sessions/<session>/<task>/output.md`:
 
 ### Completion Report (Returned to Orchestrator)
 
-This is the **only** thing that flows back through the orchestrator's context:
+This is the **only** thing that flows back through the orchestrator's context. The structured fields, allowed values, and validation rules are defined by the `CompletionReport` type in Section 12 (Protocol & Skill Architecture). The `validateCompletionReport()` function programmatically validates every report before the orchestrator sees it. The prose format rendered into each agent's prompt is:
 
 ```
 STATUS: completed|failed|needs_input
@@ -867,14 +868,16 @@ tool: {
       // 1. Validate ancestry/depth rules
       // 2. Create child session: client.session.create({ parentID })
       // 3. Select model from tier config
-      // 4. Compose system prompt: protocol + skill content + task context
+      // 4. Compose system prompt:
+      //    const system = renderProtocol() + loadSkill(skill) + renderTaskContext(task)
+      //    See Section 12 (Protocol & Skill Architecture) for renderer details
       // 5. Call session.prompt() with per-prompt overrides:
       //    - agent: "agentz"
       //    - model: { providerID, modelID }
-      //    - system: <composed skill prompt>  (appended to base agent prompt)
-      //    - tools: { ... }                   (per-session tool control)
+      //    - system: <composed prompt>  (appended to base agent prompt)
+      //    - tools: { ... }             (per-session tool control)
       //    - parts: [{ type: "text", text: <task description> }]
-      // 6. Validate output (completion report present, output file exists)
+      // 6. Validate output via validateCompletionReport() (Section 12, Validator)
       //    - On success: update DB, return completion report
       //    - On failure: classify error (transient/capability/systematic),
       //      run escalation ladder (see Section 6, Failure Handling):
@@ -974,9 +977,213 @@ agentz:
     output_format: "markdown"
 ```
 
-## 12. Skill File Structure
+## 12. Protocol & Skill Architecture
 
-Each skill file follows this template:
+The agent prompt is composed from three separate layers at dispatch time. The protocol is defined as TypeScript types — the single source of truth that drives both LLM prompt generation and programmatic output validation.
+
+### Three-Layer Prompt Composition
+
+At spawn time, `agentz_dispatch` composes the system prompt from three independent sources:
+
+```
+┌─────────────────────────────────┐
+│  AGENTZ_BASE_PROMPT             │  ← Registered with the agent (static)
+│  (identity, safety)             │
+├─────────────────────────────────┤
+│  system parameter:              │  ← Composed by agentz_dispatch
+│                                 │
+│  1. renderProtocol()            │  ← Generated from TS types (shared, 100%)
+│  2. loadSkill(skillName)        │  ← Raw .md file read (domain only)
+│  3. renderTaskContext(task)     │  ← Generated from DB state
+│                                 │
+└─────────────────────────────────┘
+```
+
+Each layer has a single responsibility:
+- **Protocol** — output format, completion report structure, note quality guidelines. Shared 100% across all 15 agents. Generated from TypeScript types by `renderProtocol()`.
+- **Skill** — role, capabilities, constraints, domain-specific instructions. Pure `.md` files with no protocol content, no template variables.
+- **Task context** — session ID, task ID, output path, ancestry chain, prior output paths, spawning rules. Generated from DB state by `renderTaskContext()`.
+
+### Structured Protocol Definition (`src/protocol/`)
+
+The protocol is defined as TypeScript types and constants. The same definitions serve two purposes: (1) `renderProtocol()` generates LLM-facing prose from them, and (2) `validateCompletionReport()` validates agent output against them. They literally cannot drift.
+
+#### File Layout
+
+```
+src/
+  protocol/
+    types.ts        # Core type definitions (Status, CompletionReport, OutputFile, etc.)
+    schema.ts       # Protocol constants (section names, field specs, constraints)
+    renderer.ts     # renderProtocol(): string — generates LLM-facing prose
+    validator.ts    # validateCompletionReport(raw): ValidationResult — binary pass/fail
+    context.ts      # renderTaskContext(task): string — generates task-specific block
+skills/
+  backend-developer.md    # Domain only: Role, Capabilities, Constraints, Domain Instructions
+  frontend-developer.md   # Domain only
+  synthesizer.md          # Domain only
+  local-explorer.md       # Domain only
+  ...  (15 files, ~25-35 lines each of pure domain content)
+```
+
+#### Type Definitions (`types.ts`)
+
+```typescript
+// === Status types ===
+export const TASK_STATUSES = ["completed", "failed", "needs_input"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+// === Recommendation types ===
+export const RECOMMENDATION_TYPES = ["ADD_TODO", "ADD_NOTE", "NEEDS_REVIEW"] as const;
+export type RecommendationType = (typeof RECOMMENDATION_TYPES)[number];
+
+export const PRIORITY_LEVELS = ["high", "medium", "low"] as const;
+export type Priority = (typeof PRIORITY_LEVELS)[number];
+
+export interface Recommendation {
+  type: RecommendationType;
+  description: string;
+  priority?: Priority;        // Only for ADD_TODO
+  category?: string;          // Only for ADD_TODO
+}
+
+// === Completion Report (returned to orchestrator) ===
+export interface CompletionReport {
+  status: TaskStatus;
+  outputPath: string;
+  summary: string;             // 2-5 sentences, hard limit
+  recommendations: Recommendation[];
+  questions?: string[];        // Only when status === "needs_input"
+  // Failure-specific fields (only when status === "failed")
+  errorType?: "transient" | "capability" | "systematic";
+  errorDetail?: string;
+  attempts?: number;
+  tiersTried?: string[];
+}
+
+// === Output File Sections ===
+export const OUTPUT_SECTIONS = ["Summary", "Details", "Artifacts", "Recommendations"] as const;
+export type OutputSection = (typeof OUTPUT_SECTIONS)[number];
+
+export interface OutputFile {
+  summary: string;             // 2-5 sentences, self-contained
+  details: string;
+  artifacts: string[];
+  recommendations: Recommendation[];
+}
+
+// === Protocol Constraints (used by both renderer and validator) ===
+export const PROTOCOL_CONSTRAINTS = {
+  summary: {
+    minSentences: 2,
+    maxSentences: 5,
+    validationMaxSentences: 10,  // Generous threshold for binary validation
+    requirement: "self-contained, understandable without the rest of the file",
+  },
+  outputFile: {
+    firstSection: "Summary" as const,
+    sections: OUTPUT_SECTIONS,
+  },
+  notes: {
+    guidance: "durable insights and constraints, not status updates",
+    goodExamples: [
+      "User prefers PostgreSQL over MySQL",
+      "Auth system uses JWT with RS256 signing",
+      "CI pipeline requires Node 20+",
+      "The payments module has no test coverage — handle carefully",
+    ],
+    badExamples: [
+      "Started working on API endpoints",
+      "Database schema completed successfully",
+      "Dispatched frontend developer",
+    ],
+  },
+} as const;
+```
+
+Key design choices:
+- `TASK_STATUSES`, `RECOMMENDATION_TYPES`, etc. are `const` arrays — the renderer iterates them to list valid values in prose; the validator checks against them.
+- `PROTOCOL_CONSTRAINTS` captures rules that both prose and validation need — summary sentence limits, section ordering, note quality guidelines.
+- `validationMaxSentences` (10) is intentionally more generous than the prompt guidance (5) — the prompt tells the LLM "2-5 sentences"; the validator catches clearly broken output (full dumps), not minor overshooting.
+
+#### Protocol Renderer (`renderer.ts`)
+
+`renderProtocol()` is a deterministic string builder — no LLM calls, no randomness, no templates. Given the same types, it always produces the same output. Tested via snapshot tests.
+
+It generates ~300-400 tokens of clear, imperative prose covering:
+
+1. **Output Protocol instructions** — write full output to the designated path, section ordering from `OUTPUT_SECTIONS`, `## Summary` requirements from `PROTOCOL_CONSTRAINTS.summary`
+2. **Full Output File format** — each section with description, recommendation format with valid types from `RECOMMENDATION_TYPES`, note quality guidelines from `PROTOCOL_CONSTRAINTS.notes`
+3. **Completion Report format** — each field with valid values, STATUS values from `TASK_STATUSES`, QUESTIONS conditionality
+
+| Type/Constant | Renderer Usage |
+|---|---|
+| `TASK_STATUSES` | Lists valid STATUS values: `"STATUS: completed\|failed\|needs_input"` |
+| `RECOMMENDATION_TYPES` | Lists valid prefixes: `"- ADD_TODO: ...\n- ADD_NOTE: ...\n- NEEDS_REVIEW: ..."` |
+| `PRIORITY_LEVELS` | Documents valid priority values in ADD_TODO format |
+| `OUTPUT_SECTIONS` | Lists required sections in order, notes Summary must be first |
+| `PROTOCOL_CONSTRAINTS.summary` | Generates the "2-5 sentences, self-contained" requirement text |
+| `PROTOCOL_CONSTRAINTS.notes` | Generates the good/bad examples for note quality |
+
+The renderer does NOT handle: conditional logic per agent type (protocol is 100% shared), template variable injection (that's `renderTaskContext()`), or domain content (that's the `.md` skill file).
+
+#### Output Validator (`validator.ts`)
+
+`validateCompletionReport()` runs inside `agentz_dispatch` after a subagent returns, **before** the result reaches the orchestrator. Binary pass/fail — no warning severity.
+
+```typescript
+export interface ValidationResult {
+  valid: boolean;
+  report?: ParsedCompletionReport;  // Structured data (when valid)
+  errors: ValidationError[];         // What failed (when invalid)
+}
+
+export interface ValidationError {
+  field: string;      // "status", "summary", "outputPath", etc.
+  error: string;      // Human-readable description
+}
+
+export function validateCompletionReport(raw: string): ValidationResult;
+```
+
+Validation checks (binary — all must pass):
+
+| Check | Pass | Fail (triggers retry/escalation) |
+|---|---|---|
+| STATUS present and valid | Value is one of `TASK_STATUSES` | Missing or unrecognized value |
+| OUTPUT path present | Non-empty string | Missing |
+| Output file exists on disk | `fs.existsSync(outputPath)` | File not written |
+| SUMMARY present | Non-empty text | Missing entirely |
+| SUMMARY reasonable length | ≤ `validationMaxSentences` (10) | Clearly not a summary (agent dumped full output) |
+| RECOMMENDATIONS format | Valid `RECOMMENDATION_TYPE` prefixes or empty | Garbled/unrecognized format |
+| QUESTIONS present when `needs_input` | STATUS is `needs_input` and QUESTIONS non-empty | STATUS is `needs_input` but no questions |
+
+Integration with the escalation ladder (Section 6): validation failures are classified as `capability` errors — the model couldn't follow the protocol. This triggers tier escalation (skip same-config retry, go directly to next tier). If the ladder is exhausted, the failure report is surfaced to the user.
+
+This validator substantially addresses review Finding #10 (No Structured Output Validation) — file existence, STATUS validity, SUMMARY constraints, RECOMMENDATIONS format, and QUESTIONS conditionality are all checked programmatically. No LLM parsing of structured fields.
+
+#### Task Context Renderer (`context.ts`)
+
+`renderTaskContext()` generates the task-specific block that was previously embedded in skill files via Handlebars-style template variables. Now handled entirely in code:
+
+```typescript
+export function renderTaskContext(task: TaskDispatchContext): string;
+```
+
+Output includes:
+- Session ID, Task ID
+- Ancestry chain (for cycle detection awareness)
+- Output path (`{{output_path}}` replacement)
+- Spawning rules: "You may spawn leaf agents for information gathering. You may spawn one non-leaf agent if needed." (protocol is 100% shared; spawning constraints enforced by toolset availability — see below)
+- Prior output paths (if any)
+
+**Spawning constraint enforcement:** The protocol prose tells all agents they can spawn leaf and non-leaf agents. For leaf agents, `agentz_dispatch` passes `tools: leafToolsOnly` — the non-leaf dispatch tool variant isn't available. The agent never sees conflicting instructions; the toolset is the enforcement mechanism.
+
+### Domain Skill Files (`skills/`)
+
+With protocol and context extracted, skill files contain only domain expertise. No output format, no completion report structure, no template variables, no note guidelines.
+
+#### Skill File Template
 
 ```markdown
 # Skill: <skill-name>
@@ -992,79 +1199,44 @@ Each skill file follows this template:
 - <What this agent must NOT do>
 - <Scope boundaries>
 
-## Output Protocol
-
-You MUST follow this output protocol:
-
-1. Perform your work (analysis, implementation, review, etc.)
-2. Write your full output to: {{output_path}}
-   - Use the format: Summary, Details, Artifacts, Recommendations (see below)
-3. Return ONLY a lightweight completion report to the orchestrator (see below)
-
-### Full Output File (write to {{output_path}})
-
-**IMPORTANT:** The `## Summary` section MUST be the first section in every output file. The synthesizer's breadth scan reads only this section during its first pass — it must be self-contained and understandable without the rest of the file.
-
-## Summary
-<2-5 sentence summary — self-contained, covers what was done, key decisions, notable findings>
-
-## Details
-<Full work output — can be arbitrarily long>
-
-## Artifacts
-<Files created/modified with paths>
-
-## Recommendations
-- ADD_TODO: <description> [priority: high|medium|low] [category: <task-category>]
-- ADD_NOTE: <key insight for future iterations>
-- NEEDS_REVIEW: <what needs human review and why>
-
-### Note Quality Guidelines
-
-ADD_NOTE is for **durable insights and constraints** that future iterations need — not status updates.
-
-**Good notes** (persist across iterations, inform future decisions):
-- "User prefers PostgreSQL over MySQL"
-- "Auth system uses JWT with RS256 signing"
-- "CI pipeline requires Node 20+"
-- "The payments module has no test coverage — handle carefully"
-
-**Bad notes** (duplicates todo/task status, adds noise):
-- "Started working on API endpoints"
-- "Database schema completed successfully"
-- "Dispatched frontend developer"
-
-Notes are always shown in the orchestrator's working view and are never pruned. Keep them high-signal.
-
-### Completion Report (return to orchestrator)
-
-STATUS: completed|failed|needs_input
-OUTPUT: {{output_path}}
-SUMMARY: <2-5 sentences — same as Summary section above>
-RECOMMENDATIONS:
-<same as Recommendations section above>
-QUESTIONS: (only when STATUS is needs_input)
-<numbered list of questions for the user>
-
-## Context
-You are operating as part of an Agentz orchestration session.
-- Session ID: {{session_id}}
-- Task ID: {{task_id}}
-- Your ancestry: {{ancestry_chain}}
-- Write your full output to: {{output_path}}
-- You may spawn leaf agents (local-explorer, web-explorer) for information gathering.
-{{#if can_spawn_non_leaf}}
-- You may spawn ONE non-leaf agent if needed (it can only spawn leaf agents).
-{{/if}}
-{{#if prior_output_paths}}
-- Relevant prior task outputs (read from filesystem if needed):
-{{#each prior_output_paths}}
-  - {{this}}
-{{/each}}
-{{/if}}
+## Domain Instructions
+<Skill-specific behavioral guidance — TDD discipline, review methodology,
+exploration strategy, etc. Only present when the skill needs behavioral
+guidance beyond what Role/Capabilities/Constraints express.>
 ```
 
-Template variables (`{{...}}`) are injected by the plugin at spawn time.
+#### Example: `backend-developer.md`
+
+```markdown
+# Skill: backend-developer
+
+## Role
+Server-side implementation specialist. Writes production-quality backend code
+including APIs, business logic, data access layers, and service integrations.
+
+## Capabilities
+- Implement REST and GraphQL APIs
+- Write business logic with proper error handling
+- Create database queries and data access code
+- Write unit and integration tests alongside implementation
+- Refactor existing code for clarity and performance
+
+## Constraints
+- Do NOT modify frontend code or UI components
+- Do NOT change database schemas (coordinate with database-architect)
+- Do NOT skip tests — every public function gets at least one test
+- Keep changes focused on the assigned task scope
+
+## Domain Instructions
+Follow TDD discipline: write a failing test first, then implement to make it
+pass, then refactor. Commit at each green state.
+
+When touching shared interfaces (API contracts, service boundaries), document
+the contract explicitly in the output's Details section so downstream agents
+can verify compatibility.
+```
+
+Four sections: Role, Capabilities, Constraints, Domain Instructions. A domain expert can write a skill file without knowing anything about the orchestration protocol.
 
 ## 13. Autocompact Resilience
 

@@ -366,9 +366,9 @@ Warning is emitted once per session, tracked by `warning_shown` in the sessions 
 
 ---
 
-### 9. [ ] Separate Protocol from Domain Skills
+### 9. [x] Separate Protocol from Domain Skills
 
-**Design reference:** Section 12 (skill file structure)
+**Design reference:** Section 12 (Protocol & Skill Architecture)
 
 **Concern:** Each skill file contains both behavioral instructions (how the agent should think — its domain expertise) and protocol specifications (output format, completion report structure, spawning rules, template variables). This means:
 - Changing the output protocol requires editing all 15 skill files
@@ -382,7 +382,17 @@ Warning is emitted once per session, tracked by `warning_shown` in the sessions 
 - **Domain skill files** that define only: role, capabilities, constraints, and domain-specific instructions.
 - The plugin composes at spawn time: `protocol template + domain skill = full agent prompt`
 
-**Decision:**
+**Decision:** Adopted **Approach A: TypeScript Types + Renderer**. Section 12 has been fully rewritten as "Protocol & Skill Architecture" with three components:
+
+1. **TypeScript type definitions** (`types.ts`) — `CompletionReport`, `FailureReport`, `OutputFile`, `TaskContext`, `Recommendation` types serve as the single source of truth for all structured formats.
+2. **Protocol renderer** (`renderProtocol()`) — generates prose protocol instructions from types at spawn time. One shared protocol for all agents (100% shared — no agent-class variants). Leaf vs non-leaf behavioral differences are enforced by toolset availability, not protocol prose.
+3. **Output validator** (`validateCompletionReport()`) — binary pass/fail validation using generous thresholds (e.g., allows up to 10 sentences while prompt guidance says 2-5). Validation failures trigger the existing escalation ladder as `capability` classification.
+
+Domain skill files contain only: role definition, behavioral instructions, and domain expertise. No protocol knowledge required. Prompt composition at spawn time: `renderProtocol() + loadSkill(skill) + renderTaskContext(task)`.
+
+This also substantially addresses Finding #10 (No Structured Output Validation) — the same types that generate protocol prose power programmatic validation. Finding #10 remains open for explicit confirmation in a future pass.
+
+Cross-references updated: Sections 3, 6, 8, and 10 now reference the new Section 12 architecture.
 
 ---
 
