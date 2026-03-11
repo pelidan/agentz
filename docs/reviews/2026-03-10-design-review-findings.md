@@ -396,7 +396,7 @@ Cross-references updated: Sections 3, 6, 8, and 10 now reference the new Section
 
 ---
 
-### 10. [ ] No Structured Output Validation
+### 10. [x] No Structured Output Validation
 
 **Design reference:** Section 8 (communication protocol)
 
@@ -418,6 +418,33 @@ LLMs are unreliable text parsers, especially for their own outputs.
 - Consider a more structured format (JSON or YAML) for the completion report instead of the freeform text
 
 **Decision:**
+
+**Approach: Programmatic Parse-Validate-Process Pipeline — Zero Domain Leakage.**
+
+Confirms and extends Finding #9's `validateCompletionReport()` into a complete pipeline where all structured data extraction, validation, and recommendation processing is handled by plugin code. The orchestrator LLM never parses raw completion reports, never sees recommendation content, and never touches output file internals. Freeform text format is retained (LLMs produce it naturally and reliably); parsing is the plugin's responsibility.
+
+**Five components in the pipeline (all inside `agentz_dispatch`):**
+
+1. **Completion Report Parser** (`parseCompletionReport()` in `src/protocol/parser.ts`) — extracts structured fields from freeform text using `STATUS:` as the anchor line. Strips markdown code fences and conversational preamble. When no completion report is detected (`found: false`), classified as `capability` error → escalation ladder.
+
+2. **Extended Validator** (`validateCompletionReport()` in `src/protocol/validator.ts`) — extends Finding #9's spec with: no-report detection, output file structure validation (all four required `## ` sections must exist with `## Summary` first). Validation failures remain `capability` errors → escalation ladder.
+
+3. **Output File Parser** (`parseOutputFile()` in `src/protocol/parser.ts`) — splits markdown by `## ` headings and maps to the four required sections. Used by the validator for structure checks and available to the synthesizer for reliable section extraction during breadth scan.
+
+4. **Programmatic Recommendation Processing** — all recommendations applied by plugin code, zero orchestrator involvement:
+   - `ADD_NOTE` → written to `notes` table immediately
+   - `ADD_TODO` → written to `todos` table with agent-assigned priority/category
+   - `NEEDS_REVIEW` → written to `review_items` table, surfaced when orchestrator decides timing is right
+   - No dedup logic in v1 — duplicate todos are self-correcting at dispatch time (agent discovers work is done)
+   - Orchestrator sees only action counts: `"2 todos added, 1 note recorded, 1 item flagged for review"`
+
+5. **Structured Orchestrator Report** — `agentz_dispatch` returns a domain-free report instead of raw completion text: task status, summary (the only domain content — already accepted in existing design), output path, and action counts. The orchestrator makes orchestration decisions (continue, pause, surface reviews) without domain knowledge leakage.
+
+**Key design principle — zero domain leakage:** Recommendation descriptions, NEEDS_REVIEW content, and output file internals never enter the orchestrator's context. Over a 20-task session with 2-3 recommendations each, this prevents 40-60 domain-specific lines from accumulating in the orchestrator — preserving its ability to focus on routing, prioritization, and iteration control.
+
+**Schema changes:** `tasks` table gains `needs_review_count` (INTEGER). New `review_items` table for storing NEEDS_REVIEW content with a `surfaced` flag.
+
+Design plan updated: Section 6 (Spawning Model) dispatch flow steps updated to 11-step parse→validate→process→present pipeline. Section 7 (Iteration Loop) step 4 rewritten — orchestrator receives domain-free structured report, recommendations pre-processed. Section 8 (Communication Protocol) gains "Programmatic Recommendation Processing" and "Structured Orchestrator Report" subsections. Section 9 (Persistence Schema) `tasks` table gains `needs_review_count`, new `review_items` table added. Section 12 (Protocol & Skill Architecture) gains `parser.ts` in file layout, `ParseResult` and `OutputFileParseResult` types, `parseCompletionReport()` and `parseOutputFile()` specs, extended validator checks table with output file structure validation and no-report detection.
 
 ---
 

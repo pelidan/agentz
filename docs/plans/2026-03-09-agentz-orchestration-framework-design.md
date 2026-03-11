@@ -168,10 +168,12 @@ All agent dispatch goes through the `agentz_dispatch` tool — a custom tool reg
 3. Publishes live status via `ctx.metadata()` (see Section 6, User Visibility During Dispatch)
 4. Composes the system prompt via `renderProtocol()` + `loadSkill()` + `renderTaskContext()` (see Section 12, Protocol & Skill Architecture)
 5. Calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides
-6. Validates output via `validateCompletionReport()` (see Section 12, Validator) and runs the escalation ladder on failure (see Failure Handling below)
-7. Updates DB (including retry metadata)
-8. Syncs agentz todos to OpenCode's sidebar (see Section 6, Sidebar Todo Sync)
-9. Returns completion or failure report
+6. Parses raw response via `parseCompletionReport()` (see Section 12, Parser) — if no completion report detected (`found: false`), classifies as `capability` error and enters the escalation ladder
+7. Validates parsed report via `validateCompletionReport()` (see Section 12, Validator), including output file structure validation via `parseOutputFile()` — on failure, classifies as `capability` error and enters the escalation ladder (see Failure Handling below)
+8. Processes recommendations programmatically (see Section 8, Programmatic Recommendation Processing): `ADD_NOTE` → written to `notes` table; `ADD_TODO` → written to `todos` table; `NEEDS_REVIEW` → written to `review_items` table
+9. Updates DB (task status, summary, output_path, retry metadata)
+10. Syncs agentz todos to OpenCode's sidebar (see Section 6, Sidebar Todo Sync)
+11. Constructs and returns a domain-free structured report to the orchestrator (see Section 8, Structured Orchestrator Report)
 
 The plugin registers a single `agentz` agent (mode: `"subagent"`) with a lean base prompt covering identity, safety boundaries, and general output format expectations. All skill-specific instructions are injected via the `system` parameter at dispatch time — the SDK **appends** this to the agent's base prompt (agent prompt first, then environment/instructions, then the `system` value).
 
@@ -430,17 +432,18 @@ Each iteration starts with **clean context** loaded from DB via the working view
 4. For picked todo:
    a. Determine task category (from todo metadata or inference)
    b. Look up tier + skill from mapping table
-   c. Spawn agent with: tier model, skill prompt, task description, relevant context refs
+   c. Call `agentz_dispatch` with: tier model, skill, task description, relevant context refs
    d. Agent writes full output to .agentz/sessions/<id>/<task>/output.md directly
-   e. Agent returns completion report to orchestrator: file reference, short summary, status, recommendations
-   f. If STATUS is needs_input: store questions in DB, surface to user, pause iteration (go to 2)
-   g. If STATUS is failed (ladder exhausted — see Section 6, Failure Handling):
+   e. `agentz_dispatch` parses, validates, and processes the agent's response programmatically (see Section 6, Mechanism steps 6-8 and Section 12, Parser & Validator). Recommendations are applied to the DB automatically — the orchestrator never parses raw completion reports.
+   f. `agentz_dispatch` returns a domain-free structured report: task status, summary, output path, action counts (e.g., "2 todos added, 1 note recorded, 1 item flagged for review"). No recommendation descriptions or domain details.
+   g. If STATUS is needs_input: store questions in DB, surface to user, pause iteration (go to 2)
+   h. If STATUS is failed (ladder exhausted — see Section 6, Failure Handling):
       - Store failure report in DB (error_type, error_detail, retries, tiers_tried)
       - Relay failure info to user with context (what failed, why, what was tried)
       - Pause iteration awaiting user decision (same flow as needs_input)
       - User may: retry (re-dispatch same config), skip (cancel todo), or rephrase the task
-   h. Orchestrator stores summary + file reference in DB (never sees full output)
-   i. Process agent recommendations (new todos, notes)
+   i. If items flagged for review: orchestrator decides when to pause and surface `NEEDS_REVIEW` items to the user (may batch, may surface at a natural break point)
+   j. Orchestrator uses summary for iteration decisions (never sees full output or raw recommendation content)
 5. Write iteration summary to DB
 6. Next iteration (go to 1)
 ```
@@ -621,6 +624,41 @@ When a subagent needs context from a prior task's output:
 2. The subagent reads the file directly from the filesystem
 3. This keeps the orchestrator lean while giving agents access to full prior outputs
 
+### Programmatic Recommendation Processing
+
+Agent recommendations are processed entirely by `agentz_dispatch` plugin code — the orchestrator LLM never sees recommendation content. This enforces the "zero domain leakage" principle: the orchestrator makes orchestration decisions (routing, prioritization, iteration control) without accumulating domain-specific knowledge from subagents.
+
+| Recommendation Type | Processing | What Orchestrator Sees |
+|---|---|---|
+| `ADD_NOTE` | Written to `notes` table immediately with `added_by` = task ID | Count only: `"N notes recorded"` |
+| `ADD_TODO` | Written to `todos` table with agent-assigned priority and category, `added_by` = task ID | Count only: `"N todos added"` |
+| `NEEDS_REVIEW` | Written to `review_items` table with `surfaced = false` | Count only: `"N items flagged for review"` |
+
+No deduplication logic in v1. Duplicate `ADD_TODO` recommendations are accepted as an inherent risk — self-correcting when the dispatched agent discovers the work is already done. If duplication becomes a real problem in practice, programmatic fuzzy dedup or injecting todo titles into task context can be added as a v2 enhancement.
+
+`NEEDS_REVIEW` items are stored in the `review_items` table (see Section 9) and surfaced to the user when the orchestrator decides the timing is right. The orchestrator sees only the count and a flag — when it chooses to surface reviews, the plugin reads the content from DB and presents it to the user directly. The orchestrator acts as a relay for timing, not an interpreter of review content.
+
+### Structured Orchestrator Report
+
+Instead of raw completion report text, `agentz_dispatch` returns a domain-free structured report to the orchestrator. This is the **only** thing the orchestrator sees after a task completes:
+
+```
+Task "<todo description>" completed.
+Summary: <2-5 sentence summary from the agent's completion report>
+Output: <output file path>
+Actions: <N> todos added, <N> notes recorded, <N> items flagged for review.
+```
+
+For failed tasks (ladder exhausted), the structured failure report is generated entirely by plugin code from escalation ladder metadata:
+
+```
+Task "<todo description>" failed.
+Error: <error type> — <error detail>
+Attempts: <N> (tiers tried: <list>)
+```
+
+The orchestrator uses this to decide next steps (continue, pause, surface to user) without needing any domain knowledge from the failed task.
+
 ### Synthesizer Reading Strategy
 
 The synthesizer agent needs both **breadth** (see everything) and **depth** (catch subtle issues). Reading all output files in full would exceed context limits on large sessions (a 20-task session generates 40,000–100,000 tokens of outputs). The synthesizer uses a two-pass reading strategy, instructed by its skill file — no architectural changes to the dispatch system.
@@ -718,7 +756,8 @@ CREATE TABLE tasks (
   input_summary TEXT, -- what was asked
   output_summary TEXT, -- compressed result
   output_path TEXT, -- filesystem path to full output
-  recommendations TEXT, -- JSON array of recommendations
+  recommendations TEXT, -- JSON array of recommendations (stored for audit; processed programmatically by agentz_dispatch)
+  needs_review_count INTEGER NOT NULL DEFAULT 0, -- count of NEEDS_REVIEW items for this task
   pending_questions TEXT, -- JSON array of questions when status is needs_input
   child_session_id TEXT, -- OpenCode child session ID for multi-turn relay (needs_input flow)
   iteration INTEGER NOT NULL,
@@ -740,6 +779,15 @@ CREATE TABLE notes (
   session_id TEXT NOT NULL REFERENCES sessions(id),
   content TEXT NOT NULL,
   added_by TEXT, -- which task/agent added this note
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE review_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  content TEXT NOT NULL, -- the NEEDS_REVIEW text from the agent
+  surfaced BOOLEAN NOT NULL DEFAULT 0, -- whether it has been shown to the user
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
@@ -1015,8 +1063,10 @@ src/
   protocol/
     types.ts        # Core type definitions (Status, CompletionReport, OutputFile, etc.)
     schema.ts       # Protocol constants (section names, field specs, constraints)
+    parser.ts       # parseCompletionReport(raw): ParseResult — extracts fields from freeform text
+                    # parseOutputFile(content): OutputFileParseResult — extracts sections from markdown
     renderer.ts     # renderProtocol(): string — generates LLM-facing prose
-    validator.ts    # validateCompletionReport(raw): ValidationResult — binary pass/fail
+    validator.ts    # validateCompletionReport(parsed): ValidationResult — binary pass/fail
     context.ts      # renderTaskContext(task): string — generates task-specific block
 skills/
   backend-developer.md    # Domain only: Role, Capabilities, Constraints, Domain Instructions
@@ -1070,6 +1120,19 @@ export interface OutputFile {
   details: string;
   artifacts: string[];
   recommendations: Recommendation[];
+}
+
+// === Parser Result Types (used by parser.ts) ===
+export interface ParseResult {
+  found: boolean;                           // Was a completion report detected at all?
+  raw: string;                              // Extracted report text (preamble/fences stripped)
+  fields: Partial<CompletionReport>;        // Best-effort field extraction
+}
+
+export interface OutputFileParseResult {
+  valid: boolean;
+  sections: Partial<Record<OutputSection, string>>;
+  errors: ValidationError[];
 }
 
 // === Protocol Constraints (used by both renderer and validator) ===
@@ -1127,9 +1190,31 @@ It generates ~300-400 tokens of clear, imperative prose covering:
 
 The renderer does NOT handle: conditional logic per agent type (protocol is 100% shared), template variable injection (that's `renderTaskContext()`), or domain content (that's the `.md` skill file).
 
+#### Completion Report Parser (`parser.ts`)
+
+`parseCompletionReport()` extracts structured fields from the raw freeform text returned by a subagent. Runs inside `agentz_dispatch` as the first processing step, before validation.
+
+```typescript
+export function parseCompletionReport(raw: string): ParseResult;
+```
+
+**Extraction strategy:**
+- Scans for `STATUS:` as the anchor line — everything from that line onward is the report
+- Strips markdown code fences (`` ``` ``) if the agent wrapped the report in a code block
+- Ignores conversational preamble (e.g., "Here's my completion report:")
+- Extracts each field by line prefix: `STATUS:`, `OUTPUT:`, `SUMMARY:`, `RECOMMENDATIONS:`, `QUESTIONS:`
+- Multi-line fields (SUMMARY, RECOMMENDATIONS, QUESTIONS) consume lines until the next recognized prefix or end-of-text
+- When `found: false` (no `STATUS:` line detected): classified as `capability` error — the agent didn't follow protocol at all. Triggers escalation ladder directly.
+
+`parseOutputFile()` splits a markdown output file by `## ` headings and maps sections to the four required output sections (`Summary`, `Details`, `Artifacts`, `Recommendations`). Used by the validator for output file structure checks and available to the synthesizer for reliable section extraction during breadth scan.
+
+```typescript
+export function parseOutputFile(content: string): OutputFileParseResult;
+```
+
 #### Output Validator (`validator.ts`)
 
-`validateCompletionReport()` runs inside `agentz_dispatch` after a subagent returns, **before** the result reaches the orchestrator. Binary pass/fail — no warning severity.
+`validateCompletionReport()` runs inside `agentz_dispatch` after parsing, **before** the result reaches the orchestrator. Binary pass/fail — no warning severity.
 
 ```typescript
 export interface ValidationResult {
@@ -1150,9 +1235,14 @@ Validation checks (binary — all must pass):
 
 | Check | Pass | Fail (triggers retry/escalation) |
 |---|---|---|
+| Report detected | `parseCompletionReport()` found `STATUS:` anchor | No completion report in response |
 | STATUS present and valid | Value is one of `TASK_STATUSES` | Missing or unrecognized value |
 | OUTPUT path present | Non-empty string | Missing |
 | Output file exists on disk | `fs.existsSync(outputPath)` | File not written |
+| Output file has `## Summary` | Present as first H2 heading | Missing or not first |
+| Output file has `## Details` | Present after Summary | Missing |
+| Output file has `## Artifacts` | Present | Missing |
+| Output file has `## Recommendations` | Present | Missing |
 | SUMMARY present | Non-empty text | Missing entirely |
 | SUMMARY reasonable length | ≤ `validationMaxSentences` (10) | Clearly not a summary (agent dumped full output) |
 | RECOMMENDATIONS format | Valid `RECOMMENDATION_TYPE` prefixes or empty | Garbled/unrecognized format |
@@ -1160,7 +1250,7 @@ Validation checks (binary — all must pass):
 
 Integration with the escalation ladder (Section 6): validation failures are classified as `capability` errors — the model couldn't follow the protocol. This triggers tier escalation (skip same-config retry, go directly to next tier). If the ladder is exhausted, the failure report is surfaced to the user.
 
-This validator substantially addresses review Finding #10 (No Structured Output Validation) — file existence, STATUS validity, SUMMARY constraints, RECOMMENDATIONS format, and QUESTIONS conditionality are all checked programmatically. No LLM parsing of structured fields.
+This validator, together with the parser and programmatic recommendation processing, fully addresses review Finding #10 (No Structured Output Validation) — report detection, field extraction, file existence, output file structure, STATUS validity, SUMMARY constraints, RECOMMENDATIONS format, and QUESTIONS conditionality are all handled programmatically. The orchestrator never parses raw completion reports or recommendation content.
 
 #### Task Context Renderer (`context.ts`)
 
