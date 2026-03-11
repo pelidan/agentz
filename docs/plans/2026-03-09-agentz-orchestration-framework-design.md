@@ -887,6 +887,38 @@ The filesystem layer (`.agentz/sessions/<id>/<task-id>/output.md`) is **independ
 
 **v2 candidates:** Automated recovery tooling (`/agentz-recover <session-id>`) and periodic JSON state snapshots are deferred to v2. If user reports show DB loss is a recurring issue, these can be added as targeted improvements.
 
+### Session Cleanup
+
+Sessions accumulate in the DB and filesystem over time. The strategy is **minimal and user-controlled**: solve list clutter through filtering, and provide a manual cleanup command. No auto-archive, no TTL, no `max_sessions` — the user decides when to delete old data.
+
+**List filtering:** `/agentz-list` defaults to showing only `active` and `paused` sessions. Flags extend the view:
+
+| Flag | Shows |
+|------|-------|
+| (none) | `active` and `paused` sessions |
+| `--all` | All sessions regardless of status |
+| `--completed` | Only `completed` sessions |
+| `--failed` | Only `failed` sessions |
+
+**Manual cleanup:** `/agentz-clean` hard-deletes completed and failed sessions — both DB rows (cascading through todos, tasks, iterations, notes, review_items) and the corresponding `.agentz/sessions/<id>/` directory tree.
+
+| Flag | Behavior |
+|------|----------|
+| (none) | Delete all `completed` and `failed` sessions |
+| `--before <date>` | Only sessions created before the given date (ISO 8601, e.g. `2026-01-15`) |
+| `--older-than <days>` | Only sessions created more than N days ago |
+| `--dry-run` | Show what would be deleted without deleting |
+| `--include-paused` | Also delete `paused` sessions matching the filter |
+
+`/agentz-clean` never deletes `active` sessions. It requires confirmation before proceeding (unless `--dry-run`), showing the count and listing session IDs + goals. The confirmation is a simple "Delete N sessions? [y/N]" prompt.
+
+**Why no auto-archive or TTL:**
+- **Storage is not the bottleneck.** A typical agentz DB with hundreds of sessions remains under 1MB. Output files are modest (10–50KB each). Disk pressure from agentz is unlikely in practice.
+- **Auto-deletion risks surprise.** Users may reference old sessions weeks later. An explicit command is safer and more predictable.
+- **Archive adds complexity for marginal benefit.** Moving files between directories requires updating DB paths, introduces a new state to track, and the recovery value over `/agentz-clean --dry-run` is minimal.
+
+**v2 candidate:** If users report needing to keep completed sessions but hide them from daily use, a `status = 'archived'` state (set via `/agentz-archive <session-id>`) can be added without changing the cleanup model.
+
 ## 10. Plugin Integration
 
 ### Primary Agent Orchestrator
@@ -944,7 +976,8 @@ const sessionAgentMap = new Map<string, string>();
 | `/agentz-status [session-id]` | Show current session status, todos, progress, recent activity, and notes (see /agentz-status Output Format below) |
 | `/agentz-resume [session-id]` | Resume a paused or interrupted session (see Section 14) |
 | `/agentz-pause` | Pause current session (saves state) |
-| `/agentz-list` | List all sessions with status |
+| `/agentz-list [--all\|--completed\|--failed]` | List sessions (defaults to active/paused only; flags extend the view — see Section 9, Session Cleanup) |
+| `/agentz-clean [--before <date>\|--older-than <days>] [--dry-run] [--include-paused]` | Delete completed/failed sessions (DB rows + filesystem). See Section 9, Session Cleanup |
 
 The user can also start orchestration implicitly by switching to the `agentz` agent and stating their goal — the orchestrator's complexity decision determines whether to create a session.
 

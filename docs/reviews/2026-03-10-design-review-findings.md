@@ -519,7 +519,7 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 
 ---
 
-### 13. [ ] No Session Cleanup / Archival Strategy
+### 13. [x] No Session Cleanup / Archival Strategy
 
 **Design reference:** Section 9 (filesystem structure)
 
@@ -534,7 +534,14 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 - Add a `max_sessions` config option
 - Consider TTL on session data
 
-**Decision:**
+**Decision:** Minimal, user-controlled cleanup — solve list clutter through filtering, provide manual deletion.
+
+- `/agentz-list` defaults to `active` and `paused` sessions only. `--all`, `--completed`, `--failed` flags extend the view.
+- `/agentz-clean` hard-deletes completed/failed sessions (DB rows cascade + filesystem directory). Supports `--before <date>`, `--older-than <days>`, `--dry-run`, `--include-paused`. Requires confirmation. Never deletes `active` sessions.
+- No auto-archive, no TTL, no `max_sessions`. Storage is not the bottleneck (DB stays under 1MB for hundreds of sessions). Auto-deletion risks surprise. Archive adds complexity for marginal benefit.
+- v2 candidate: `status = 'archived'` + `/agentz-archive` if users need to keep-but-hide completed sessions.
+
+**Design plan changes:** Section 9 (Persistence Schema) — added "Session Cleanup" subsection after "Filesystem Recovery" with list filtering behavior, `/agentz-clean` specification, and rationale. Section 10 (Slash Commands table) — updated `/agentz-list` entry with flag syntax, added `/agentz-clean` entry with flags and cross-reference.
 
 ---
 
