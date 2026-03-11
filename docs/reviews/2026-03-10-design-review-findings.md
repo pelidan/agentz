@@ -448,7 +448,7 @@ Design plan updated: Section 6 (Spawning Model) dispatch flow steps updated to 1
 
 ---
 
-### 11. [ ] SQLite Resilience
+### 11. [x] SQLite Resilience
 
 **Design reference:** Section 9 (persistence schema)
 
@@ -463,6 +463,26 @@ Design plan updated: Section 6 (Spawning Model) dispatch flow steps updated to 1
 - Consider adding a `PRAGMA integrity_check` on startup
 
 **Decision:**
+
+**Approach: Pragmatic Hardening — WAL + Integrity Check + Session Lock + Documented Recovery.**
+
+SQLite is the correct choice for an embedded local developer tool. The resilience concern is addressed with minimal hardening that covers the likely failure modes (crash during write, concurrent access) without building backup/recovery infrastructure that isn't justified for v1.
+
+**Five components:**
+
+1. **WAL mode + `synchronous=NORMAL`** — set on DB open. WAL provides crash resilience (committed transactions survive process crashes) and concurrent reads (status queries, sidebar sync, synthesizer reads all proceed without blocking writes). `synchronous=NORMAL` trades a negligible durability risk on sudden power loss for better write throughput — acceptable for a local dev tool.
+
+2. **`busy_timeout(5000)`** — 5-second wait on lock contention instead of immediate `SQLITE_BUSY` failure. Covers brief timing overlaps between concurrent connections (e.g., `/agentz-status` reading while a task completion writes).
+
+3. **Startup `PRAGMA integrity_check`** — runs once on plugin initialization. If it fails, the plugin enters degraded mode (no orchestration, status commands still work) and warns the user. Takes <100ms for a typical agentz DB. Does not crash OpenCode.
+
+4. **Session-level advisory lock** — file-based lock at `.agentz/sessions/<id>/.lock` containing PID + timestamp. Prevents two OpenCode instances from orchestrating the same session simultaneously. Stale locks (PID no longer running) are cleaned up automatically on the next startup. Two instances can still work on different sessions in the same project, and read-only operations are never blocked (WAL handles concurrent reads).
+
+5. **Documented filesystem recovery** — output files (`.agentz/sessions/<id>/<task-id>/output.md`) survive DB loss independently. A new "Filesystem Recovery" subsection in Section 9 documents what survives, what is lost, and how users can manually reconstruct from output files. No automated recovery tooling in v1.
+
+**Why not periodic backups or JSON snapshots:** The effort/risk calculus doesn't justify it for v1. SQLite with WAL is already very crash-safe for single-writer scenarios. DB deletion is rare. The output files provide a partial safety net for the actual work product. If user reports show DB loss is a recurring problem, event-driven JSON snapshots or SQLite's online backup API can be added as targeted v2 improvements.
+
+**Design plan changes:** Section 9 (Persistence Schema) gains "Database Resilience" subsection (PRAGMA config, integrity check, session-level lock), "Filesystem Recovery" subsection, and updated filesystem layout with `.lock` file. Section 10 (Plugin Integration) Entry Point updated with explicit 5-step plugin initialization sequence including DB open, PRAGMA setup, and integrity check.
 
 ---
 

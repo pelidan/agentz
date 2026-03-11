@@ -799,12 +799,91 @@ CREATE TABLE review_items (
 ├── agentz.db              # SQLite database
 └── sessions/
     └── <session-id>/
+        ├── .lock            # Session-level advisory lock (present only while session is being orchestrated)
         ├── task-001/
         │   └── output.md   # Full agent output
         ├── task-002/
         │   └── output.md
         └── ...
 ```
+
+### Database Resilience
+
+SQLite is configured for crash safety, concurrent read access, and contention handling at database open time. These PRAGMAs are set once when the plugin opens the DB connection:
+
+```sql
+PRAGMA journal_mode = WAL;           -- Write-Ahead Logging: crash resilience + concurrent reads
+PRAGMA synchronous = NORMAL;         -- safe for WAL mode; fsync at WAL checkpoints only
+PRAGMA busy_timeout = 5000;          -- 5s wait on lock contention instead of immediate SQLITE_BUSY
+PRAGMA foreign_keys = ON;            -- enforce FK constraints
+```
+
+**WAL mode** enables concurrent readers (e.g., `/agentz-status` queries, sidebar todo sync, synthesizer reads) while the orchestrator writes. Committed transactions survive process crashes. WAL mode persists in the DB file itself — the PRAGMA is idempotent on subsequent connections.
+
+**`synchronous = NORMAL`** trades a negligible durability risk on sudden power loss for significantly better write throughput. For a local developer tool this is the right trade-off — the alternative (`FULL`) fsyncs on every transaction commit.
+
+**`busy_timeout`** prevents transient `SQLITE_BUSY` errors when two connections briefly contend (e.g., `/agentz-status` reading while a task completion writes). The second connection waits up to 5 seconds instead of failing immediately.
+
+#### Startup Integrity Check
+
+On plugin initialization, before any orchestration operations:
+
+```typescript
+const result = db.pragma('integrity_check');
+if (result[0].integrity_check !== 'ok') {
+  console.warn('agentz: Database integrity check failed. Orchestration disabled.');
+  console.warn('agentz: Run "sqlite3 .agentz/agentz.db \'PRAGMA integrity_check\'" for details.');
+  console.warn('agentz: Output files in .agentz/sessions/ are unaffected.');
+  // Plugin enters degraded mode — no orchestration, /agentz-status still works for filesystem info
+  return;
+}
+```
+
+Performance: `integrity_check` scans the full DB. For a typical agentz DB (6 tables, hundreds to low thousands of rows), this completes in <100ms. Runs once at startup only.
+
+If integrity check fails, the plugin refuses to start orchestration but does not crash OpenCode. The user is directed to inspect the DB manually and informed that output files are unaffected.
+
+#### Session-Level Advisory Lock
+
+Concurrent orchestration of the same session (two OpenCode instances in the same project) is prevented by a file-based advisory lock.
+
+**Lock file:** `.agentz/sessions/<session-id>/.lock`
+
+**Lock file contents:**
+```json
+{ "pid": 12345, "timestamp": "2026-03-11T10:00:00Z", "opencode_session": "abc123" }
+```
+
+**Acquisition** — when `agentz_dispatch` starts or resumes a session:
+1. If `.lock` exists, read it
+2. Check if the PID is still running (`process.kill(pid, 0)` — signal 0 tests process existence without sending a signal)
+3. If PID is dead → stale lock from a previous crash → delete it, acquire new lock
+4. If PID is alive → active lock → refuse with error: `"Session <id> is being orchestrated by another OpenCode instance (PID <pid>, started <timestamp>). Use /agentz-status to check progress, or /agentz-resume after the other instance finishes."`
+
+**Release** — on session pause, completion, or plugin shutdown (via `process.on('exit', ...)` cleanup handler).
+
+**Stale lock recovery:** Between a crash and the next startup, the lock file exists but the PID is dead. The staleness check (step 3) handles this automatically — no manual intervention needed.
+
+**Scope:** The lock prevents concurrent orchestration of the same session only. Two OpenCode instances can safely work on different agentz sessions in the same project, and read-only operations (`/agentz-status`, `agentz_query`) are never blocked — WAL mode handles concurrent reads.
+
+### Filesystem Recovery
+
+The filesystem layer (`.agentz/sessions/<id>/<task-id>/output.md`) is **independent** of the SQLite database. Output files are written directly by subagents and survive even if `agentz.db` is corrupted or deleted.
+
+**What survives DB loss:**
+- Full agent output for every completed task (analysis, code, recommendations)
+- The directory structure itself encodes session and task IDs
+
+**What is lost:**
+- Session metadata: goal text, configuration, review cycle count
+- Todo list: descriptions, status, priority, ordering, category assignments
+- Iteration history: summaries and decisions
+- Notes: cross-iteration insights and constraints
+- Task metadata: tier assignments, failure history, completion summaries
+
+**Manual recovery:** Users can reconstruct a session by reading the surviving output files and starting a new session. Each output file's `## Summary` section provides a self-contained description of the completed work, and the `## Recommendations` section captures todos and notes that were in flight.
+
+**v2 candidates:** Automated recovery tooling (`/agentz-recover <session-id>`) and periodic JSON state snapshots are deferred to v2. If user reports show DB loss is a recurring issue, these can be added as targeted improvements.
 
 ## 10. Plugin Integration
 
@@ -813,6 +892,13 @@ CREATE TABLE review_items (
 The orchestrator is the **main agent** — always active, not activated by slash commands. Like oh-my-opencode-slim's phase-reminder, the orchestrator prompt is injected into every conversation via the system prompt hook.
 
 ### Entry Point
+
+**Plugin initialization sequence** (on plugin load):
+1. Open SQLite database (`.agentz/agentz.db`), creating the file and `.agentz/` directory if they don't exist
+2. Set database PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON` (see Section 9, Database Resilience)
+3. Run `PRAGMA integrity_check` — if failed, enter degraded mode (no orchestration, status commands still work)
+4. Run schema migrations if needed
+5. Register agent, tools, hooks, and slash commands (below)
 
 The plugin registers:
 - **Agent** (`agentz`): Single subagent with lean base prompt — used as the target for all dispatched skill sessions (see Agent Spawning Implementation below)
