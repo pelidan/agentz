@@ -61,7 +61,7 @@ During development, both plugins coexist naturally: the user switches to the `ag
 ┌──────────────▼──────────────────────┐
 │  Layer 2: Protocol & Skills              │
 │  - Shared protocol (types.ts → prose)    │
-│  - 15 domain skills (.md, behavior only) │
+│  - 16 domain skills (.md, behavior only) │
 │  - Mapping table (task→tier+skill)       │
 │  - Prompt renderer & output validator    │
 └──────────────┬──────────────────────┘
@@ -155,7 +155,8 @@ Non-leaf agents perform substantive work. They have direct tool access for simpl
 | `devops-engineer` | CI/CD, deployment, infrastructure |
 | `security-auditor` | Security review, vulnerability assessment |
 | `technical-writer` | Documentation, API docs, guides |
-| `synthesizer` | Two-pass review: breadth scan of all task summaries, then targeted deep reads of flagged outputs. Identifies requirement gaps and cross-task inconsistencies. Can add new todos, flag issues, or approve for verification. Adapts depth based on session size and task complexity (see Section 8, Synthesizer Reading Strategy). |
+| `triage-analyst` | Session-start complexity assessment and todo decomposition. Receives the user's goal + project knowledge (global notes), returns a structured plan: complexity rating, todo list with priorities/categories/suggested tiers. Runs on `balanced` tier. Also dispatched mid-session for re-triage when scope changes are detected (see Section 7, Triage Dispatch). |
+| `synthesizer` | Three-pass review: (1) breadth scan of all task summaries, (2) targeted deep reads of flagged outputs, (3) knowledge curation — reviews draft global notes against existing confirmed notes; confirms, rejects, merges, or supersedes. Identifies requirement gaps and cross-task inconsistencies. Can add new todos, flag issues, or approve for verification. Adapts depth based on session size and task complexity (see Section 8, Synthesizer Reading Strategy). |
 
 ## 6. Spawning Model
 
@@ -170,7 +171,7 @@ All agent dispatch goes through the `agentz_dispatch` tool — a custom tool reg
 5. Calls `session.prompt()` with per-prompt `model`, `system`, and `tools` overrides
 6. Parses raw response via `parseCompletionReport()` (see Section 12, Parser) — if no completion report detected (`found: false`), classifies as `capability` error and enters the escalation ladder
 7. Validates parsed report via `validateCompletionReport()` (see Section 12, Validator), including output file structure validation via `parseOutputFile()` — on failure, classifies as `capability` error and enters the escalation ladder (see Failure Handling below)
-8. Processes recommendations programmatically (see Section 8, Programmatic Recommendation Processing): `ADD_NOTE` → written to `notes` table; `ADD_TODO` → written to `todos` table; `NEEDS_REVIEW` → written to `review_items` table
+8. Processes recommendations programmatically (see Section 8, Programmatic Recommendation Processing): `ADD_NOTE` → written to `notes` table; `ADD_TODO` → written to `todos` table; `NEEDS_REVIEW` → written to `review_items` table; `ADD_GLOBAL_NOTE` → written to `global_notes` table with `status = 'draft'`
 9. Updates DB (task status, summary, output_path, retry metadata)
 10. Syncs agentz todos to OpenCode's sidebar (see Section 6, Sidebar Todo Sync)
 11. Constructs and returns a domain-free structured report to the orchestrator (see Section 8, Structured Orchestrator Report)
@@ -328,9 +329,9 @@ Orchestrator
 
 The orchestrator is a **primary agent** — activated by switching to the `agentz` agent in the TUI (via the agent cycle command). When active, the orchestrator prompt and working view are injected into every LLM call. When the user switches to a different agent, agentz injects nothing — the orchestrator is effectively paused. The orchestrator is a **pure task processor** that never accumulates large outputs in its context. It does NOT brainstorm or analyze business/technology concerns itself; those are delegated to specialist agents.
 
-### Complexity Decision
+### Triage Dispatch
 
-For every user request, the orchestrator evaluates whether full orchestration is needed:
+For every user request, the orchestrator performs a quick complexity check to decide whether full orchestration is needed. The criteria remain the same (single-file change? quick question? → handle directly). If orchestration is warranted, the orchestrator creates a session and **immediately dispatches the `triage-analyst`** as the first task.
 
 **Handle directly (no session)** when:
 - Single-file changes
@@ -343,6 +344,23 @@ For every user request, the orchestrator evaluates whether full orchestration is
 - Tasks spanning multiple files/systems
 - Work requiring analysis → design → implementation → testing
 - Anything where persistent state tracking is needed
+
+**Triage dispatch (session start):** The `triage-analyst` receives the user's goal and any confirmed global notes (project knowledge). It returns a structured triage report:
+
+```
+COMPLEXITY: low|medium|high|very_high
+RATIONALE: <1-2 sentences explaining the assessment>
+TODOS:
+- <description> [priority: high|medium|low] [category: <task-category>] [tier: <suggested-tier>]
+- <description> [priority: high|medium|low] [category: <task-category>] [tier: <suggested-tier>]
+...
+```
+
+The orchestrator adopts the triage plan mechanically — todos are inserted into the DB with the triage-analyst's suggested priorities, categories, and tiers. The orchestrator does not second-guess or modify the plan; it executes it.
+
+**Mid-session re-triage:** Scope change detection heuristic: if a single task produces 3+ `ADD_TODO` recommendations, OR any task produces a high-priority `ADD_TODO`, the orchestrator dispatches a re-triage. The re-triage analyst receives the current todo list (completed + remaining), the triggering recommendations, and global notes. It returns an updated plan that may reprioritize, merge, or add todos. The orchestrator adopts the updated plan mechanically.
+
+**v2 consideration — mechanical orchestrator:** With triage outsourced, the orchestrator's remaining work is nearly mechanical: pick the next todo by priority, dispatch the mapped skill, process structured results, check completion. This opens the door to replacing the orchestrator LLM with pure plugin code (a TypeScript state machine) in v2. See Section 15 (V2 Scope) for details.
 
 ### Model Capability Check
 
@@ -467,14 +485,14 @@ Every orchestration session automatically includes three fixed todos that run af
 | Fixed Todo | Skill | Trigger | Purpose |
 |---|---|---|---|
 | **Code Review** | `code-reviewer` | All regular todos completed AND at least one non-trivial `develop-backend`/`develop-frontend` todo exists | Reads implementation output files + actual code diffs from filesystem. Reviews for correctness, style, patterns, edge cases. May add rework todos. Skipped if the orchestrator deems all implementation trivial or if no implementation tasks exist. |
-| **Synthesize & Review** | `synthesizer` | Code Review approved (or skipped) | Two-pass review: (1) breadth scan of all task Summary sections to assess coverage and flag concerns, (2) targeted deep reads of flagged outputs for coherence analysis. Identifies requirement gaps, cross-task inconsistencies, architectural misalignment. May add new todos or approve for verification. Does NOT re-evaluate code quality (trusts the reviewer). See Section 8, Synthesizer Reading Strategy. |
+| **Synthesize & Review** | `synthesizer` | Code Review approved (or skipped) | Three-pass review: (1) breadth scan of all task Summary sections to assess coverage and flag concerns, (2) targeted deep reads of flagged outputs for coherence analysis, (3) knowledge curation — reviews draft global notes against existing confirmed notes; confirms, rejects, merges, or supersedes. Identifies requirement gaps, cross-task inconsistencies, architectural misalignment. May add new todos or approve for verification. Does NOT re-evaluate code quality (trusts the reviewer). See Section 8, Synthesizer Reading Strategy. |
 | **Verify** | `backend-tester` (or appropriate) | Synthesizer approved | Build, test, lint — concrete verification of implementation |
 
 **Reviewer / Synthesizer boundary:** The code reviewer evaluates *implementation quality* (correctness, patterns, edge cases, test coverage of implementation code). The synthesizer evaluates *project completeness* (requirement coverage, cross-task coherence, gap analysis). The synthesizer trusts that reviewer-approved code is correct and focuses exclusively on whether the right things were built and whether they fit together.
 
 **Review cycle limit:** To prevent infinite review-rework loops, the session tracks a `review_cycle` counter. After N cycles (configurable, default 2), the orchestrator escalates to the user with outstanding issues and pauses for a decision.
 
-The synthesizer uses a **two-pass reading strategy** to stay within context limits while maintaining both breadth and depth (see Section 8, Synthesizer Reading Strategy for full details). For small sessions (< 5 tasks) the two passes are effectively the same since all outputs are read. For large sessions (15+), the two-pass approach reduces token consumption by ~60-70% compared to reading all outputs in full.
+The synthesizer uses a **three-pass reading strategy** to stay within context limits while maintaining both breadth and depth (see Section 8, Synthesizer Reading Strategy for full details). For small sessions (< 5 tasks) the first two passes are effectively the same since all outputs are read. For large sessions (15+), the breadth+depth passes reduce token consumption by ~60-70% compared to reading all outputs in full. Pass 3 (knowledge curation) adds minimal token overhead as it operates on the compact global notes table.
 
 ### Working View (What the Orchestrator Sees Per Iteration)
 
@@ -518,6 +536,7 @@ For data pruned from the working view, the orchestrator can call the `agentz_que
 | `iterations` | Full iteration history with summaries and decisions |
 | `task` (+ `task_id`) | Specific task detail: input, output summary, recommendations, status |
 | `notes` (+ optional `keyword`) | All notes, optionally filtered by keyword substring |
+| `global_notes` (+ optional `keyword`) | All global notes (confirmed + stale), optionally filtered by keyword. Includes status, category, confirmed count, and staleness markers |
 
 The tool reads directly from DB and returns formatted text. No LLM interpretation layer.
 
@@ -587,6 +606,7 @@ Written to `.agentz/sessions/<session>/<task>/output.md`. The required sections 
 - ADD_TODO: <description> [priority: high|medium|low] [category: <task-category>]
 - ADD_NOTE: <key insight for future iterations>
 - NEEDS_REVIEW: <what needs human review and why>
+- ADD_GLOBAL_NOTE: <durable project fact for cross-session knowledge> [category: <optional-category>]
 ```
 
 ### Completion Report (Returned to Orchestrator)
@@ -601,6 +621,7 @@ RECOMMENDATIONS:
 - ADD_TODO: <description> [priority: high|medium|low] [category: <task-category>]
 - ADD_NOTE: <key insight for future iterations>
 - NEEDS_REVIEW: <what needs human review and why>
+- ADD_GLOBAL_NOTE: <durable project fact for cross-session knowledge> [category: <optional-category>]
 QUESTIONS: (only when STATUS is needs_input)
 - <question 1>
 - <question 2>
@@ -635,6 +656,7 @@ Agent recommendations are processed entirely by `agentz_dispatch` plugin code �
 | `ADD_NOTE` | Written to `notes` table immediately with `added_by` = task ID | Count only: `"N notes recorded"` |
 | `ADD_TODO` | Written to `todos` table with agent-assigned priority and category, `added_by` = task ID | Count only: `"N todos added"` |
 | `NEEDS_REVIEW` | Written to `review_items` table with `surfaced = false` | Count only: `"N items flagged for review"` |
+| `ADD_GLOBAL_NOTE` | Written to `global_notes` table with `status = 'draft'`, `source_session_id` and `source_task_id` set | Count only: `"N global notes drafted"` |
 
 No deduplication logic in v1. Duplicate `ADD_TODO` recommendations are accepted as an inherent risk — self-correcting when the dispatched agent discovers the work is already done. If duplication becomes a real problem in practice, programmatic fuzzy dedup or injecting todo titles into task context can be added as a v2 enhancement.
 
@@ -648,7 +670,16 @@ Instead of raw completion report text, `agentz_dispatch` returns a domain-free s
 Task "<todo description>" completed.
 Summary: <2-5 sentence summary from the agent's completion report>
 Output: <output file path>
-Actions: <N> todos added, <N> notes recorded, <N> items flagged for review.
+Actions: <N> todos added, <N> notes recorded, <N> items flagged for review, <N> global notes drafted.
+```
+
+For triage tasks (dispatched at session start or mid-session re-triage), the structured triage report is:
+
+```
+Task "Triage: <goal summary>" completed.
+Complexity: <low|medium|high|very_high>
+Rationale: <1-2 sentences>
+Todos added: <N> (priorities: <breakdown>)
 ```
 
 For failed tasks (ladder exhausted), the structured failure report is generated entirely by plugin code from escalation ladder metadata:
@@ -663,7 +694,7 @@ The orchestrator uses this to decide next steps (continue, pause, surface to use
 
 ### Synthesizer Reading Strategy
 
-The synthesizer agent needs both **breadth** (see everything) and **depth** (catch subtle issues). Reading all output files in full would exceed context limits on large sessions (a 20-task session generates 40,000–100,000 tokens of outputs). The synthesizer uses a two-pass reading strategy, instructed by its skill file — no architectural changes to the dispatch system.
+The synthesizer agent needs both **breadth** (see everything) and **depth** (catch subtle issues). Reading all output files in full would exceed context limits on large sessions (a 20-task session generates 40,000–100,000 tokens of outputs). The synthesizer uses a three-pass reading strategy, instructed by its skill file — no architectural changes to the dispatch system.
 
 #### Pass 1 — Breadth Scan (All Tasks, Summaries Only)
 
@@ -683,19 +714,36 @@ The synthesizer reads full output files only for flagged tasks — typically 3�
 
 The synthesizer performs coherence analysis on selected outputs: contract consistency, error handling patterns, assumption alignment, naming conventions, missing integration points.
 
-#### Token Budget (Two-Pass vs. Full Read)
+#### Pass 3 — Knowledge Curation (Global Notes)
+
+After completing the breadth and depth analysis, the synthesizer curates the project's cross-session knowledge:
+
+1. **Review draft notes:** All `global_notes` with `status = 'draft'` are presented. The synthesizer evaluates each against existing confirmed notes and the session's work:
+   - **Confirm:** The note is a durable project fact → set `status = 'confirmed'`, set `last_confirmed`, increment `confirmed_count`
+   - **Reject:** The note is session-specific, transient, or incorrect → set `status = 'rejected'`
+   - **Merge:** The note overlaps with an existing confirmed note → supersede the draft, update the confirmed note's content if needed
+   - **Supersede:** The note replaces an outdated confirmed note → confirm the new note, set old note's `superseded_by`
+
+2. **Re-confirm existing notes:** All `global_notes` with `status = 'confirmed'` are reviewed. If still valid based on the session's work, `last_confirmed` is updated and `confirmed_count` incremented. This acts as a heartbeat — notes that remain relevant keep getting refreshed.
+
+3. **Output:** The synthesizer emits its curation decisions as part of its completion report. The plugin processes these programmatically, updating the `global_notes` table accordingly.
+
+Token overhead for Pass 3 is minimal: global notes are short (1-2 sentences each), and a mature project might have 20-50 confirmed notes (~500-1,200 tokens).
+
+#### Token Budget (Three-Pass vs. Full Read)
 
 For a 20-task session (outputs averaging 4,000 tokens each):
 
-| Component | Full Read (old) | Two-Pass |
+| Component | Full Read (old) | Three-Pass |
 |---|---|---|
 | All outputs in full | ~80,000 | — |
 | All summaries (DB + output `## Summary`) | — | ~6,000 |
 | Deep reads (~5 selected outputs) | — | ~20,000 |
+| Global notes curation (Pass 3) | — | ~500-1,200 |
 | Overhead (system prompt, skill, task prompt) | ~3,000 | ~3,000 |
-| **Total** | **~83,000** | **~29,000** |
+| **Total** | **~83,000** | **~29,500-30,200** |
 
-Comfortably within 128K context. Even a 40-task session stays under 50K with this approach.
+Comfortably within 128K context. Even a 40-task session stays under 52K with this approach.
 
 #### Output `## Summary` Section Requirement
 
@@ -792,7 +840,31 @@ CREATE TABLE review_items (
   surfaced BOOLEAN NOT NULL DEFAULT 0, -- whether it has been shown to the user
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE global_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content TEXT NOT NULL,
+  category TEXT, -- optional categorization (e.g., 'tech-stack', 'team-preference', 'architecture')
+  status TEXT NOT NULL DEFAULT 'draft', -- draft, confirmed, superseded, rejected
+  source_session_id TEXT REFERENCES sessions(id), -- session where this note originated
+  source_task_id TEXT, -- task that emitted the ADD_GLOBAL_NOTE recommendation
+  last_confirmed TEXT, -- timestamp of last confirmation by synthesizer
+  confirmed_count INTEGER NOT NULL DEFAULT 0, -- number of times synthesizer has re-confirmed
+  superseded_by INTEGER REFERENCES global_notes(id), -- if superseded, points to the replacement
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
+
+#### Global Notes Lifecycle
+
+Global notes follow a confirmation-based lifecycle managed by the synthesizer's Pass 3 (Knowledge Curation):
+
+1. **Creation:** When an agent emits `ADD_GLOBAL_NOTE`, the plugin writes it to `global_notes` with `status = 'draft'`.
+2. **Confirmation:** At session end, the synthesizer reviews all draft notes against existing confirmed notes. It may confirm (set `status = 'confirmed'`, set `last_confirmed`, increment `confirmed_count`), reject (`status = 'rejected'`), merge (confirm one, supersede the other), or supersede (create new note, set old note's `superseded_by`).
+3. **Re-confirmation:** Each session's synthesizer also reviews existing confirmed notes. If still valid, `last_confirmed` is updated and `confirmed_count` incremented. This acts as a heartbeat.
+4. **Staleness:** Notes not confirmed in 5+ sessions receive a `[stale]` marker when injected into agent context. No auto-deletion — stale notes may still be valid, just unexercised.
+5. **User management:** Users can manually manage notes via `/agentz-notes` (see Section 10).
 
 ### Filesystem Structure
 
@@ -978,6 +1050,10 @@ const sessionAgentMap = new Map<string, string>();
 | `/agentz-pause` | Pause current session (saves state) |
 | `/agentz-list [--all\|--completed\|--failed]` | List sessions (defaults to active/paused only; flags extend the view — see Section 9, Session Cleanup) |
 | `/agentz-clean [--before <date>\|--older-than <days>] [--dry-run] [--include-paused]` | Delete completed/failed sessions (DB rows + filesystem). See Section 9, Session Cleanup |
+| `/agentz-notes` | List confirmed + stale global notes with categories and confirmation counts |
+| `/agentz-notes --all` | Include draft, rejected, and superseded notes |
+| `/agentz-notes delete <id>` | Permanently delete a global note by ID |
+| `/agentz-notes edit <id> <text>` | Edit a global note's content (resets to `draft` status for re-confirmation) |
 
 The user can also start orchestration implicitly by switching to the `agentz` agent and stating their goal — the orchestrator's complexity decision determines whether to create a session.
 
@@ -1087,7 +1163,7 @@ tool: {
     parameters: {
       section: {
         type: "string",
-        enum: ["todos", "iterations", "task", "notes"],
+        enum: ["todos", "iterations", "task", "notes", "global_notes"],
         description: "Which state section to retrieve"
       },
       task_id: {
@@ -1097,7 +1173,7 @@ tool: {
       },
       keyword: {
         type: "string",
-        description: "Keyword substring filter (only used when section is 'notes')",
+        description: "Keyword substring filter (only used when section is 'notes' or 'global_notes')",
         optional: true
       },
     },
@@ -1117,6 +1193,9 @@ tool: {
         case "notes":
           // Returns all notes, optionally filtered by keyword
           return formatNotes(db.getNotes(session.id), args.keyword);
+        case "global_notes":
+          // Returns all global notes (confirmed + stale by default)
+          return formatGlobalNotes(db.getGlobalNotes(args.keyword));
       }
     }
   }
@@ -1191,7 +1270,7 @@ At spawn time, `agentz_dispatch` composes the system prompt from three independe
 ```
 
 Each layer has a single responsibility:
-- **Protocol** — output format, completion report structure, note quality guidelines. Shared 100% across all 15 agents. Generated from TypeScript types by `renderProtocol()`.
+- **Protocol** — output format, completion report structure, note quality guidelines. Shared 100% across all 16 agents. Generated from TypeScript types by `renderProtocol()`.
 - **Skill** — role, capabilities, constraints, domain-specific instructions. Pure `.md` files with no protocol content, no template variables.
 - **Task context** — session ID, task ID, output path, ancestry chain, prior output paths, spawning rules. Generated from DB state by `renderTaskContext()`.
 
@@ -1214,9 +1293,10 @@ src/
 skills/
   backend-developer.md    # Domain only: Role, Capabilities, Constraints, Domain Instructions
   frontend-developer.md   # Domain only
-  synthesizer.md          # Domain only
+  synthesizer.md          # Domain only (includes Pass 3: Knowledge Curation instructions)
+  triage-analyst.md       # Domain only: complexity assessment, todo decomposition
   local-explorer.md       # Domain only
-  ...  (15 files, ~25-35 lines each of pure domain content)
+  ...  (16 files, ~25-35 lines each of pure domain content)
 ```
 
 #### Type Definitions (`types.ts`)
@@ -1227,7 +1307,7 @@ export const TASK_STATUSES = ["completed", "failed", "needs_input"] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 // === Recommendation types ===
-export const RECOMMENDATION_TYPES = ["ADD_TODO", "ADD_NOTE", "NEEDS_REVIEW"] as const;
+export const RECOMMENDATION_TYPES = ["ADD_TODO", "ADD_NOTE", "NEEDS_REVIEW", "ADD_GLOBAL_NOTE"] as const;
 export type RecommendationType = (typeof RECOMMENDATION_TYPES)[number];
 
 export const PRIORITY_LEVELS = ["high", "medium", "low"] as const;
@@ -1237,7 +1317,7 @@ export interface Recommendation {
   type: RecommendationType;
   description: string;
   priority?: Priority;        // Only for ADD_TODO
-  category?: string;          // Only for ADD_TODO
+  category?: string;          // For ADD_TODO (task category) or ADD_GLOBAL_NOTE (knowledge category)
 }
 
 // === Completion Report (returned to orchestrator) ===
@@ -1304,6 +1384,22 @@ export const PROTOCOL_CONSTRAINTS = {
       "Dispatched frontend developer",
     ],
   },
+  globalNotes: {
+    guidance: "durable project-level facts that persist across sessions — tech stack, team preferences, architectural decisions, known constraints",
+    injectionCap: 400, // max tokens for global notes injection into child agent context
+    staleSessions: 5, // sessions without re-confirmation before [stale] marker
+    goodExamples: [
+      "Project uses PostgreSQL 15 with pgvector extension",
+      "Team convention: all API responses wrapped in { data, error } envelope",
+      "Auth uses JWT with RS256, keys rotated monthly via AWS Secrets Manager",
+      "The legacy billing module is untested — changes require manual QA sign-off",
+    ],
+    badExamples: [
+      "Completed the auth refactor",
+      "User wants dark mode",  // too session-specific, not a durable project fact
+      "Fixed the bug in payments",
+    ],
+  },
 } as const;
 ```
 
@@ -1325,11 +1421,12 @@ It generates ~300-400 tokens of clear, imperative prose covering:
 | Type/Constant | Renderer Usage |
 |---|---|
 | `TASK_STATUSES` | Lists valid STATUS values: `"STATUS: completed\|failed\|needs_input"` |
-| `RECOMMENDATION_TYPES` | Lists valid prefixes: `"- ADD_TODO: ...\n- ADD_NOTE: ...\n- NEEDS_REVIEW: ..."` |
+| `RECOMMENDATION_TYPES` | Lists valid prefixes: `"- ADD_TODO: ...\n- ADD_NOTE: ...\n- NEEDS_REVIEW: ...\n- ADD_GLOBAL_NOTE: ..."` |
 | `PRIORITY_LEVELS` | Documents valid priority values in ADD_TODO format |
 | `OUTPUT_SECTIONS` | Lists required sections in order, notes Summary must be first |
 | `PROTOCOL_CONSTRAINTS.summary` | Generates the "2-5 sentences, self-contained" requirement text |
 | `PROTOCOL_CONSTRAINTS.notes` | Generates the good/bad examples for note quality |
+| `PROTOCOL_CONSTRAINTS.globalNotes` | Generates quality guidance and examples for ADD_GLOBAL_NOTE recommendations |
 
 The renderer does NOT handle: conditional logic per agent type (protocol is 100% shared), template variable injection (that's `renderTaskContext()`), or domain content (that's the `.md` skill file).
 
@@ -1409,8 +1506,11 @@ Output includes:
 - Output path (`{{output_path}}` replacement)
 - Spawning rules: "You may spawn leaf agents for information gathering. You may spawn one non-leaf agent if needed." (protocol is 100% shared; spawning constraints enforced by toolset availability — see below)
 - Prior output paths (if any)
+- **Project Knowledge** (global notes): Confirmed global notes injected under a `## Project Knowledge` section, ordered by `confirmed_count` DESC. Capped at 400 tokens. Notes not confirmed in 5+ sessions include a `[stale]` marker. Overflow is truncated with a pointer: `"(Use agentz_query section='global_notes' for all project knowledge)"`. **Not injected for the orchestrator** — global notes are domain knowledge, and the orchestrator remains domain-free (consistent with the "zero domain leakage" principle).
 
 **Spawning constraint enforcement:** The protocol prose tells all agents they can spawn leaf and non-leaf agents. For leaf agents, `agentz_dispatch` passes `tools: leafToolsOnly` — the non-leaf dispatch tool variant isn't available. The agent never sees conflicting instructions; the toolset is the enforcement mechanism.
+
+**Global notes injection scope:** The `renderTaskContext()` function includes global notes for all child agents (non-leaf and leaf) but **not** for the orchestrator. The orchestrator's working view (Section 7) deliberately excludes global notes to maintain zero domain leakage. Global notes are project-level domain knowledge ("uses PostgreSQL", "prefers tabs") that should inform agent work but not orchestrator routing decisions.
 
 ### Domain Skill Files (`skills/`)
 
@@ -1753,3 +1853,44 @@ State transitions:
 - `needs_input` → `in_progress` (when user responds, resume child session)
 - `completed` → `needs_rework` (when a subsequent change request invalidates it)
 - `needs_rework` triggers creation of a new rework todo
+
+## 15. V2 Scope: Mechanical Orchestrator (State Machine)
+
+With triage outsourced to the `triage-analyst` (Section 7, Triage Dispatch), the orchestrator's remaining responsibilities are nearly mechanical:
+
+1. **Pick next todo** by priority from the DB
+2. **Look up tier + skill** from the mapping table
+3. **Call `agentz_dispatch`** with the mapped configuration
+4. **Process the structured result** (update DB, check completion)
+5. **Check if done** (all todos complete → trigger fixed todo sequence)
+
+None of these steps require LLM reasoning — they are deterministic state transitions driven by DB state. This opens the door to replacing the orchestrator LLM with **pure plugin code**: a TypeScript state machine that executes the iteration loop directly, eliminating orchestrator token costs entirely.
+
+### What Changes in V2
+
+| Responsibility | V1 (LLM orchestrator) | V2 (State machine) |
+|---|---|---|
+| Complexity decision | LLM evaluates (simple heuristic) | Same heuristic, in code |
+| Triage dispatch | LLM calls `agentz_dispatch` | Code calls dispatch directly |
+| Todo prioritization | LLM picks from list | `ORDER BY priority, sort_order` |
+| Dispatch routing | LLM reads mapping table | Code reads mapping table |
+| Result processing | Already programmatic (`agentz_dispatch`) | Same |
+| Re-triage detection | LLM applies heuristic | Code applies same heuristic |
+| Fixed todo sequencing | LLM follows rules | Code follows rules |
+| User interaction relay | LLM relays `needs_input` | Code relays directly |
+
+### What Stays as LLM
+
+- **Analyst-mediated brainstorming** (pre-session): Interactive requirements exploration still needs an LLM, but that's the `business-analyst` / `technical-analyst`, not the orchestrator.
+- **Triage analysis**: The `triage-analyst` agent still requires LLM reasoning for complexity assessment and todo decomposition.
+- **All specialist agents**: Backend developer, reviewer, synthesizer, etc. — domain work remains LLM-driven.
+
+### Prerequisites
+
+- V1 must prove the triage pattern works reliably (triage plans are adoptable without modification)
+- The iteration loop must be stable enough that edge cases (mid-session re-triage, review cycles, interruption recovery) are fully enumerated
+- Concurrent dispatch (`prompt_async()`) should be considered simultaneously, as a state machine naturally supports parallel task execution
+
+### Cost Impact
+
+Eliminating the orchestrator LLM removes ~800-1,300 tokens of working view injection per iteration, plus the LLM call cost for each routing decision. For a 20-iteration session on a `balanced` tier model, this saves ~20 LLM calls worth of orchestrator reasoning — potentially the largest single cost reduction available.

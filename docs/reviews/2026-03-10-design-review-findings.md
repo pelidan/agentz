@@ -545,7 +545,7 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 
 ---
 
-### 14. [ ] Cross-Session Learning Is Missing
+### 14. [x] Cross-Session Learning Is Missing
 
 **Design reference:** Section 9 (notes table)
 
@@ -557,7 +557,25 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 - Inject relevant global notes into new sessions automatically
 - This creates a lightweight "project memory" that improves over time
 
-**Decision:**
+**Decision:** Adopted with a hybrid cross-session learning system that goes beyond simple note promotion:
+
+1. **New recommendation type `ADD_GLOBAL_NOTE`:** Agents emit this when discovering durable project facts. Plugin code writes these to a `global_notes` table with `status = 'draft'`.
+
+2. **Synthesizer extended with Pass 3 (Knowledge Curation):** At session end, the synthesizer reviews draft global notes + existing confirmed notes. It confirms, rejects, merges, or supersedes notes. This provides LLM-quality curation without human overhead.
+
+3. **Confirmation-based aging:** `last_confirmed` timestamp updated each time the synthesizer re-confirms a note. Notes not confirmed in 5+ sessions get a `[stale]` marker in agent context. No auto-deletion — stale notes may still be valid, just unexercised.
+
+4. **Global notes injection — child agents only, NOT orchestrator:** Key insight: global notes ARE domain knowledge, and the orchestrator should remain domain-free (consistent with Finding #10's "zero domain leakage" principle). `renderTaskContext()` includes a `## Project Knowledge` section with confirmed global notes for all child agents. 400-token cap, ordered by `confirmed_count` DESC, overflow truncated with `agentz_query` pointer.
+
+5. **Triage outsourcing:** Complexity decision and todo decomposition moved OUT of the orchestrator to a `triage-analyst` agent dispatched at session start. Triage agent runs on `balanced` tier, receives project knowledge via global notes injection, returns a structured plan (complexity rating + todos with priorities/categories/suggested tiers). Orchestrator adopts the plan mechanically. Mid-session re-triage triggered by scope change heuristic (3+ `ADD_TODO` from one task OR any high-priority recommendation).
+
+6. **V2 scope — mechanical orchestrator:** With triage outsourced, the orchestrator's remaining work is nearly mechanical (pick next todo, dispatch, process, check done). This opens the door to replacing the orchestrator LLM with a TypeScript state machine in v2, documented as a new Section 15.
+
+7. **`/agentz-notes` slash command:** List, edit, and delete global notes. `--all` flag includes draft/rejected/superseded.
+
+8. **`global_notes` table schema:** Includes `status` (draft/confirmed/superseded/rejected), `last_confirmed`, `confirmed_count`, `superseded_by`, `source_session_id`, `source_task_id`, and `category` fields.
+
+**Design plan changes:** Section 5 (Agent Taxonomy) — added `triage-analyst` to non-leaf agents table, updated `synthesizer` description for three-pass review including Pass 3 knowledge curation. Section 7 (Orchestrator Design) — replaced "Complexity Decision" with "Triage Dispatch" subsection covering session-start triage, mid-session re-triage heuristic, and v2 mechanical orchestrator forward reference. Section 8 (Communication Protocol) — added `ADD_GLOBAL_NOTE` to recommendation processing table and output/completion report formats, added triage report format to structured orchestrator report. Section 9 (Persistence Schema) — added `global_notes` table with full schema after `review_items`, added "Global Notes Lifecycle" subsection. Section 10 (Plugin Integration) — added `/agentz-notes` variants to slash commands table, added `global_notes` to `agentz_query` enum and handler. Section 12 (Protocol & Skill Architecture) — added `ADD_GLOBAL_NOTE` to `RECOMMENDATION_TYPES`, added `globalNotes` to `PROTOCOL_CONSTRAINTS`, added `triage-analyst.md` to skills list, updated `renderTaskContext()` to include project knowledge injection with 400-token cap and orchestrator exclusion, updated renderer usage table. Added new Section 15 (V2 Scope: Mechanical Orchestrator) with full state machine design, responsibility comparison table, prerequisites, and cost impact analysis. Updated synthesizer reading strategy from two-pass to three-pass throughout (Section 7, Section 8).
 
 ---
 
