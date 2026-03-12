@@ -208,7 +208,7 @@ Design plan updated: Section 7 (Orchestrator Design) gains "Working View" subsec
 
 **Decision:**
 
-**Approach: Two-Pass Synthesizer — Breadth-First, Then Targeted Depth.**
+**Approach: Three-Pass Synthesizer — Breadth-First, Targeted Depth, Then Knowledge Curation.**
 
 The synthesizer works in two explicit phases, instructed by its skill file. No architectural changes to the dispatch system or orchestrator loop.
 
@@ -613,6 +613,6 @@ These aspects of the design are strong and should be carried forward as-is:
 3. **Clean context per iteration** — Each iteration loads from DB, not accumulated chat.
 4. **Tier abstraction** — Semantic tiers decoupled from concrete models.
 5. **Interruption/resume handling** (Section 13) — Two-case distinction with business-analyst for change analysis.
-6. **Autocompact resilience** (Section 12) — Three-hook strategy is thorough.
+6. **Autocompact resilience** (Section 13) — Four-hook strategy is thorough.
 7. **Rework tracking** (`rework_of` in todos) — Good lineage for invalidation chains.
 8. **Adaptive synthesizer complexity** — Scales review depth with task complexity.
