@@ -579,7 +579,7 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 
 ---
 
-### 15. [ ] Leaf Agent "Freely Spawnable" Could Be Expensive
+### 15. [x] Leaf Agent "Freely Spawnable" Could Be Expensive
 
 **Design reference:** Section 6 (spawning model)
 
@@ -591,6 +591,16 @@ SQLite is the correct choice for an embedded local developer tool. The resilienc
 - Consider whether some leaf operations (single grep, single file read) should just be direct tool calls instead of spawning an agent
 
 **Decision:**
+
+**Approach: Soft Budget + Skill Guidance.**
+
+Per-task leaf spawn budget (`max_leaf_spawns_per_task`, default 10) enforced in-memory by `agentz_dispatch`. When exhausted, further leaf spawn requests return a graceful fallback message directing the agent to use direct tools. Counter is per parent agent execution (not per session), scoped to the dispatch call's lifetime — no DB schema changes.
+
+Protocol guidance added to `renderProtocol()` — a "Direct Tools vs. Leaf Agents" heuristic section injected into all agent prompts. Teaches agents when compression via leaf agent is warranted vs. when direct tool calls are faster and sufficient.
+
+Config: `defaults.max_leaf_spawns_per_task: 10` in agentz.yaml. Set to `null` for unlimited (restores original "freely spawnable" behavior).
+
+Design plan changes: Section 6 (Spawning Model) Rule 1 updated with budget semantics, new "Leaf Spawn Budget" subsection added after Depth Visualization. Section 11 (Configuration) `defaults` gains `max_leaf_spawns_per_task: 10`. Section 12 (Protocol & Skill Architecture) `renderProtocol()` gains "Direct Tools vs. Leaf Agents" guidance subsection in renderer output.
 
 ---
 

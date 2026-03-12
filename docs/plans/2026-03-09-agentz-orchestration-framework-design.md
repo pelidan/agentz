@@ -180,7 +180,7 @@ The plugin registers an `agentz-worker` agent (mode: `"subagent"`) with a lean b
 
 ### Rules
 
-1. **Leaf agents** (`local-explorer`, `web-explorer`): anyone can spawn them freely — they are context compressors that never spawn children.
+1. **Leaf agents** (`local-explorer`, `web-explorer`): anyone can spawn them, up to `max_leaf_spawns_per_task` times per parent execution (default 10, configurable — see Section 11). When the budget is exhausted, the dispatch tool returns a graceful fallback message directing the agent to use its direct tools. Counter is per parent agent execution, not per session — each dispatched agent gets its own independent budget. They are context compressors that never spawn children.
 
 2. **Non-leaf agents**: can spawn leaf agents freely. Can spawn another non-leaf agent at max depth 1 (that child can only spawn leaf agents).
 
@@ -315,15 +315,31 @@ Agentz-specific fields (`category`, `rework_of`, `added_by`, `completed_by`, `so
 ```
 Orchestrator
 ├── business-analyst (non-leaf, depth 0)
-│   ├── local-explorer (leaf) ← freely spawned
-│   └── web-explorer (leaf) ← freely spawned
+│   ├── local-explorer (leaf) ← budget: 1/10
+│   └── web-explorer (leaf) ← budget: 2/10
 ├── backend-developer (non-leaf, depth 0)
-│   ├── local-explorer (leaf) ← freely spawned
+│   ├── local-explorer (leaf) ← budget: 1/10 (own budget)
 │   └── backend-tester (non-leaf, depth 1) ← max depth
-│       └── local-explorer (leaf) ← leaf only at depth 1
+│       └── local-explorer (leaf) ← budget: 1/10 (own budget)
 └── code-reviewer (non-leaf, depth 0)
-    └── local-explorer (leaf) ← freely spawned
+    └── local-explorer (leaf) ← budget: 1/10
 ```
+
+### Leaf Spawn Budget
+
+Leaf agents are lightweight, but uncapped spawning creates a degenerate case: a single agent could spawn dozens of leaf agents for work that direct tool calls would handle better and faster.
+
+**Mechanism:** The `agentz_dispatch` tool maintains an in-memory counter per parent task execution. Each leaf agent spawn (`local-explorer` or `web-explorer`) increments the counter. When the counter reaches `max_leaf_spawns_per_task` (default 10), further leaf spawn requests are not executed. Instead, the tool returns:
+
+> "Leaf agent budget exhausted (10/10). Use your direct tools (grep, glob, read, webfetch) for remaining information gathering."
+
+**Scope rules:**
+- Counter is per parent agent execution — a `backend-developer` gets 10 leaf spawns, and a `backend-tester` it spawned at depth 1 gets its own independent 10
+- Only leaf agent spawns count — non-leaf child spawns (depth-1 agents) are governed by the max-depth-1 rule and do not consume leaf budget
+- Counter lives in-memory inside the dispatch execution context — no DB schema changes, no persistence across retries
+- Setting `max_leaf_spawns_per_task` to `null` in config restores unlimited spawning
+
+**Why in-memory, not DB:** The budget is a guardrail against degenerate loops, not an accounting system. In-memory per execution is the simplest correct implementation. If observability is needed later, a `leaf_spawns` column can be added to the `tasks` table as a targeted improvement.
 
 ## 7. Orchestrator Design
 
@@ -1244,6 +1260,7 @@ agentz:
   defaults:
     max_iterations: 50
     max_review_cycles: 2  # review-rework cycles before escalating to user
+    max_leaf_spawns_per_task: 10  # per parent agent execution; null = unlimited
     output_format: "markdown"
 ```
 
@@ -1427,6 +1444,12 @@ It generates ~300-400 tokens of clear, imperative prose covering:
 | `PROTOCOL_CONSTRAINTS.summary` | Generates the "2-5 sentences, self-contained" requirement text |
 | `PROTOCOL_CONSTRAINTS.notes` | Generates the good/bad examples for note quality |
 | `PROTOCOL_CONSTRAINTS.globalNotes` | Generates quality guidance and examples for ADD_GLOBAL_NOTE recommendations |
+
+The renderer also generates a **"Direct Tools vs. Leaf Agents"** guidance section, injected into every agent's prompt. This section teaches agents when to use their direct tools (grep, glob, read, webfetch) vs. spawning a leaf agent:
+
+- **Use direct tools when:** the operation is targeted (specific file, specific search term), the result is small enough to process directly, or you need a quick factual lookup.
+- **Spawn a leaf agent when:** you need broad exploration across many files/directories, the raw results would be too large for your context and need compression, or the research requires multi-step navigation with judgment calls.
+- **Rule of thumb:** if you can get the answer with 1-3 direct tool calls, use direct tools. If you need 5+ tool calls with intermediate reasoning, spawn a leaf agent.
 
 The renderer does NOT handle: conditional logic per agent type (protocol is 100% shared), template variable injection (that's `renderTaskContext()`), or domain content (that's the `.md` skill file).
 
