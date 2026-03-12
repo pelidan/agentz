@@ -6,7 +6,7 @@ Agentz is an OpenCode plugin that enables multi-agent orchestration with dynamic
 
 **Core idea:** An orchestrator agent processes a user's goal iteratively — breaking it into todos, dispatching specialized agents (each with a tier-appropriate model and domain skill), collecting results, and updating state in a database. Each iteration starts with clean context loaded from DB, not accumulated conversation history.
 
-**Inspired by** oh-my-opencode-slim but fundamentally different: agents divided by tier + dynamic skills (not fixed roles), persistence layer for state, clean orchestrator context per iteration, iterative processing with DB state.
+**Inspired by** [oh-my-opencode-slim](https://github.com/alvinunreal/oh-my-opencode-slim) but fundamentally different: agents divided by tier + dynamic skills (not fixed roles), persistence layer for state, clean orchestrator context per iteration, iterative processing with DB state. Also draws from [superpowers](https://github.com/obra/superpowers)'s process disciplines (brainstorming, TDD, systematic debugging, verification) and builds on top of the [OpenCode](https://github.com/anomalyco/opencode) plugin SDK.
 
 ## 2. Superpowers Coexistence Strategy
 
@@ -79,14 +79,12 @@ During development, both plugins coexist naturally: the user switches to the `ag
 
 Semantic tier tags abstracted from concrete models. Users map tiers to models in config.
 
-| Tier | Rating | Intent | Example Models |
-|------|--------|--------|----------------|
-| `fast-cheap` | S | Quick lookups, simple transforms | haiku, gpt-4o-mini, gemini-flash |
-| `balanced` | M | Most coding tasks, analysis | sonnet, gpt-4o, gemini-pro |
-| `powerful` | L | Complex architecture, large refactors | opus, o1, gemini-ultra |
-| `reasoning` | XL | Multi-step logic, math, planning | o1, o3, deepseek-r1 |
-
-**Rating** — a t-shirt size (S, M, L, XL) expressing the tier's general model capability. Used for tier comparisons (e.g., orchestrator minimum model check) without hardcoding model-specific knowledge. Ordering: `S < M < L < XL`.
+| Tier | Intent | Example Models |
+|------|--------|----------------|
+| `fast-cheap` | Quick lookups, simple transforms | haiku, gpt-4o-mini, gemini-flash |
+| `balanced` | Most coding tasks, analysis | sonnet, gpt-4o, gemini-pro |
+| `powerful` | Complex architecture, large refactors | opus, o1, gemini-ultra |
+| `reasoning` | Multi-step logic, math, planning | o1, o3, deepseek-r1 |
 
 **No cost multiplier in tier definition** — that's a config-time decision by the user.
 
@@ -376,23 +374,7 @@ The orchestrator adopts the triage plan mechanically — todos are inserted into
 
 **Mid-session re-triage:** Scope change detection heuristic: if a single task produces 3+ `ADD_TODO` recommendations, OR any task produces a high-priority `ADD_TODO`, the orchestrator dispatches a re-triage. The re-triage analyst receives the current todo list (completed + remaining), the triggering recommendations, and global notes. It returns an updated plan that may reprioritize, merge, or add todos. The orchestrator adopts the updated plan mechanically.
 
-**v2 consideration — mechanical orchestrator:** With triage outsourced, the orchestrator's remaining work is nearly mechanical: pick the next todo by priority, dispatch the mapped skill, process structured results, check completion. This opens the door to replacing the orchestrator LLM with pure plugin code (a TypeScript state machine) in v2. See Section 15 (V2 Scope) for details.
-
-### Model Capability Check
-
-Before creating an orchestration session, the plugin checks whether the user's active model meets the minimum capability threshold for orchestration. The orchestrator makes routing decisions (task categorization, tier selection, recommendation processing, iteration control) that require strong reasoning — a weak model orchestrating expensive specialists is wasteful.
-
-**Resolution mechanism (substring match):** The plugin resolves the user's active OpenCode model ID to a tier by checking if the model ID contains any tier's configured `model` value as a substring. Example: user's model `claude-3.5-sonnet` contains `sonnet` → matches tier `balanced` (rating M). Match order: longest `model` value first to avoid false prefix matches.
-
-**Comparison:** The resolved tier's `rating` is compared against the `orchestrator_tier` config's `rating` using the ordering `S < M < L < XL`. If the user's model rates below the threshold, the plugin injects a one-time warning into the conversation via the system prompt:
-
-> "Note: Your current model ({model_id}, resolved to tier {resolved_tier}/rating {rating}) is below the recommended orchestrator tier ({orchestrator_tier}/rating {min_rating}). Task decomposition, routing, and recommendation processing may be degraded. Consider switching to a {min_rating}+ model for orchestration sessions."
-
-**Unknown models:** If the user's model ID does not substring-match any configured tier's `model` field, it is assumed capable (no warning). This avoids false positives on new or custom model IDs.
-
-**No override, no degradation:** The orchestrator runs the full pipeline regardless of the model. The warning is informational only. If real-world usage shows weak-model orchestration is a common failure pattern, adaptive prompt complexity (simplified orchestrator prompt for weak models) can be added as a v2 enhancement.
-
-**Warning tracking:** The `sessions` table includes a `warning_shown` flag (default false) to ensure the warning is emitted at most once per session.
+**Orchestrator model intent:** With triage outsourced and recommendation processing fully programmatic, the orchestrator's remaining work is nearly mechanical: pick the next todo by priority, dispatch the mapped skill, process structured results, check completion. 8-9 of its 11 responsibilities are fully deterministic. The 2-3 remaining subjective calls (complexity decision, "non-trivial" check for code review, re-triage timing) are well within `fast-cheap` model capability. The orchestrator intentionally runs on whatever model the user configures — including free/cheap models — because its role does not require strong reasoning. See Section 15 (V2 Scope) for future directions.
 
 ### Analyst-Mediated Brainstorming (Pre-Session)
 
@@ -787,7 +769,6 @@ CREATE TABLE sessions (
   config TEXT, -- JSON: tier mappings, overrides
   review_cycles INTEGER NOT NULL DEFAULT 0, -- tracks review-rework iterations for cycle limit
   max_review_cycles INTEGER NOT NULL DEFAULT 2, -- configurable limit before escalating to user
-  warning_shown BOOLEAN NOT NULL DEFAULT 0, -- whether the model capability warning has been emitted
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -1230,25 +1211,18 @@ The SDK also provides `session.prompt_async()` (returns `204: void`) for fire-an
 ```yaml
 # .opencode/agentz.yaml (or in opencode.json under "agentz" key)
 agentz:
-  # Minimum recommended tier for orchestrator model capability check (see Section 7)
-  orchestrator_tier: balanced
-
   tiers:
     fast-cheap:
       model: "haiku"
-      rating: S
       escalate_to: "balanced"
     balanced:
       model: "sonnet"
-      rating: M
       escalate_to: "powerful"
     powerful:
       model: "opus"
-      rating: L
       escalate_to: null  # no further escalation — surface to user
     reasoning:
       model: "o3"
-      rating: XL
       escalate_to: null
 
   # Override default mapping for specific categories
@@ -1877,43 +1851,47 @@ State transitions:
 - `completed` → `needs_rework` (when a subsequent change request invalidates it)
 - `needs_rework` triggers creation of a new rework todo
 
-## 15. V2 Scope: Mechanical Orchestrator (State Machine)
+## 15. V2 Scope: Evolving the Orchestrator
 
-With triage outsourced to the `triage-analyst` (Section 7, Triage Dispatch), the orchestrator's remaining responsibilities are nearly mechanical:
+V1 intentionally uses a cheap/free model for orchestration because the orchestrator's role is near-mechanical after triage, recommendation processing, and complexity decisions were outsourced to specialist agents and programmatic plugin code. V2 should evaluate whether to push further in this direction or pull back toward a smarter orchestrator. Two candidate directions:
 
-1. **Pick next todo** by priority from the DB
-2. **Look up tier + skill** from the mapping table
-3. **Call `agentz_dispatch`** with the mapped configuration
-4. **Process the structured result** (update DB, check completion)
-5. **Check if done** (all todos complete → trigger fixed todo sequence)
+### Option A: Pure Code Orchestrator (State Machine)
 
-None of these steps require LLM reasoning — they are deterministic state transitions driven by DB state. This opens the door to replacing the orchestrator LLM with **pure plugin code**: a TypeScript state machine that executes the iteration loop directly, eliminating orchestrator token costs entirely.
+Replace the orchestrator LLM entirely with a TypeScript state machine. The remaining LLM-dependent orchestrator responsibilities (complexity decision, "non-trivial" check, re-triage timing) would be converted to heuristics or rule-based code.
 
-### What Changes in V2
+**Advantages:** Eliminates orchestrator token costs entirely. Deterministic behavior. Faster iteration loops.
 
-| Responsibility | V1 (LLM orchestrator) | V2 (State machine) |
-|---|---|---|
-| Complexity decision | LLM evaluates (simple heuristic) | Same heuristic, in code |
-| Triage dispatch | LLM calls `agentz_dispatch` | Code calls dispatch directly |
-| Todo prioritization | LLM picks from list | `ORDER BY priority, sort_order` |
-| Dispatch routing | LLM reads mapping table | Code reads mapping table |
-| Result processing | Already programmatic (`agentz_dispatch`) | Same |
-| Re-triage detection | LLM applies heuristic | Code applies same heuristic |
-| Fixed todo sequencing | LLM follows rules | Code follows rules |
-| User interaction relay | LLM relays `needs_input` | Code relays directly |
+**Risks:** Edge cases in complexity assessment and re-triage timing may resist codification. Loses the ability to handle genuinely novel orchestration situations gracefully.
 
-### What Stays as LLM
+### Option B: Smarter Orchestrator Absorbing Specialist Roles
 
-- **Analyst-mediated brainstorming** (pre-session): Interactive requirements exploration still needs an LLM, but that's the `business-analyst` / `technical-analyst`, not the orchestrator.
-- **Triage analysis**: The `triage-analyst` agent still requires LLM reasoning for complexity assessment and todo decomposition.
-- **All specialist agents**: Backend developer, reviewer, synthesizer, etc. — domain work remains LLM-driven.
+Move the orchestrator to a more capable model and absorb some specialist roles (triage-analyst, synthesizer) back into the orchestrator. Fewer dispatch round-trips, simpler architecture.
 
-### Prerequisites
+**Advantages:** Fewer moving parts. Reduces dispatch overhead. A single strong model may handle triage + orchestration + synthesis more coherently than three separate agents.
+
+**Risks:** Re-introduces the original problem of orchestrator context bloat. Higher per-iteration cost. Harder to test individual concerns in isolation.
+
+### Prerequisites (Either Direction)
 
 - V1 must prove the triage pattern works reliably (triage plans are adoptable without modification)
 - The iteration loop must be stable enough that edge cases (mid-session re-triage, review cycles, interruption recovery) are fully enumerated
-- Concurrent dispatch (`prompt_async()`) should be considered simultaneously, as a state machine naturally supports parallel task execution
+- Real-world data on orchestrator failure modes should inform the choice — if the cheap model orchestrator works well, Option A is the natural next step; if orchestrator judgment gaps emerge, Option B may be warranted
 
-### Cost Impact
+## 16. References & Inspirations
 
-Eliminating the orchestrator LLM removes ~800-1,300 tokens of working view injection per iteration, plus the LLM call cost for each routing decision. For a 20-iteration session on a `balanced` tier model, this saves ~20 LLM calls worth of orchestrator reasoning — potentially the largest single cost reduction available.
+This design draws from three open-source projects:
+
+### [OpenCode](https://github.com/anomalyco/opencode)
+
+- **Docs:** https://opencode.ai/docs
+- The runtime platform on which Agentz is built. Agentz is an OpenCode plugin that leverages its SDK (`prompt()`, hooks, custom slash commands, MCP server integration) to orchestrate multi-agent workflows. OpenCode provides the foundational agent execution environment, tool infrastructure, and extension points.
+
+### [oh-my-opencode-slim](https://github.com/alvinunreal/oh-my-opencode-slim)
+
+- **Site:** https://ohmyopencodeslim.com
+- The primary structural inspiration. Its multi-agent delegation pattern (`delegate_task` tool, role-based agents) informed the core idea of an orchestrator dispatching specialized sub-agents. Agentz diverges significantly: replacing fixed roles with tier-based dynamic skill assignment, adding a persistence layer for cross-session state, and using iterative DB-driven context instead of accumulated conversation history.
+
+### [superpowers](https://github.com/obra/superpowers)
+
+- **Blog post:** https://blog.fsck.com/2025/10/09/superpowers/
+- A skill-based discipline system for AI coding agents. Agentz coexists with superpowers (Section 2) — the orchestrator and sub-agents load superpowers skills as system prompts to enforce process disciplines like brainstorming, TDD, systematic debugging, and verification-before-completion. Superpowers provides the "how to think" layer; Agentz provides the "how to coordinate" layer.

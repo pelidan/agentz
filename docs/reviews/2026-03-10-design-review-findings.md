@@ -340,29 +340,17 @@ A weak orchestrator model could:
 
 **Decision:**
 
-**Approach: Startup Warning + Tier Rating Attribute + Substring Model Matching.**
+**Approach: Intentionally cheap/free orchestrator — no minimum tier, no warning.**
 
-The plugin does not override the user's model. Instead, it detects model capability at orchestration session startup and emits a one-time warning if the active model falls below the configured threshold. The orchestrator runs the full pipeline regardless — no degradation, no blocking.
+The concern's premise was invalidated by subsequent findings. Finding #10 outsourced triage to the `triage-analyst` agent, and Finding #14 made recommendation processing fully programmatic within the `agentz_dispatch` tool. After these changes, the orchestrator no longer categorizes tasks, selects tiers, picks skills, or processes recommendations — those responsibilities now live in specialist agents and plugin code.
 
-**New tier attribute: `rating`** — a t-shirt size (S, M, L, XL) expressing each tier's general model capability. Added to the tier definition in Section 4. Ordering: `S < M < L < XL`. This avoids hardcoding model-specific knowledge — tier comparisons use the `rating` field instead of maintaining a separate model capability lookup table.
+The orchestrator's remaining responsibilities are near-mechanical: 8-9 of 11 are fully deterministic (pick next todo by priority, look up tier+skill from mapping table, call dispatch, process structured results, relay `needs_input`, relay failures, apply re-triage heuristic, print progress). The 2-3 subjective calls that remain (complexity decision, "non-trivial" check for code review, re-triage timing) are simple binary judgments well within `fast-cheap` model capability.
 
-**New config field: `orchestrator_tier`** — specifies the minimum recommended tier for the orchestrator (default: `balanced`/M). Added to Section 11.
+**No minimum tier check.** No warning mechanism. No `rating` attribute on tiers. No `orchestrator_tier` config field. No `warning_shown` session tracking. The orchestrator intentionally runs on whatever model the user configures — including free models — because its role does not require strong reasoning.
 
-**Model-to-tier resolution (substring match):** At session startup, the plugin resolves the user's active OpenCode model ID to a tier by checking if the model ID contains any tier's configured `model` value as a substring. Example: user's model `claude-3.5-sonnet` contains `sonnet` → matches tier `balanced` (rating M). Longest match first to avoid false prefix matches. Unknown models (no substring match) are assumed capable — no false warnings.
+**V2 direction is open.** If real-world usage reveals orchestrator judgment gaps, v2 could either (a) replace the orchestrator LLM with a pure code state machine (pushing further toward mechanical), or (b) move to a stronger model and absorb triage/synthesizer roles back into the orchestrator (pulling toward a smarter coordinator). V1 data will inform this choice. See Section 15.
 
-**Warning mechanism:** When the resolved rating is below the `orchestrator_tier`'s rating, the plugin injects a one-time warning into the conversation via the system prompt:
-
-> "Note: Your current model ({model_id}, resolved to tier {resolved_tier}/rating {rating}) is below the recommended orchestrator tier ({orchestrator_tier}/rating {min_rating}). Task decomposition, routing, and recommendation processing may be degraded. Consider switching to a {min_rating}+ model for orchestration sessions."
-
-Warning is emitted once per session, tracked by `warning_shown` in the sessions table.
-
-**No override, no degradation (v1).** Full pipeline runs regardless of model. If real-world usage shows weak-model orchestration is a common failure pattern, adaptive prompt complexity (simplified orchestrator prompt for weak models) can be added as a v2 enhancement.
-
-**Schema changes:** `sessions` table gains `warning_shown` (BOOLEAN, default false).
-
-**Config changes:** Section 11 gains `orchestrator_tier` field (string, default `"balanced"`). Tier config objects gain `rating` field (S/M/L/XL).
-
-**Design plan changes:** Section 4 (Tier System) tier table gains Rating column, rating description added. Section 7 (Orchestrator Design) gains "Model Capability Check" subsection after Complexity Decision. Section 9 (Persistence Schema) `sessions` table gains `warning_shown` field. Section 11 (Configuration) tier objects gain `rating` field, new `orchestrator_tier` field added.
+**Design plan changes:** Section 4 tier table: `Rating` column removed. Section 7: "Model Capability Check" subsection removed; "v2 consideration" paragraph updated to reflect cheap/free model intent. Section 9: `warning_shown` removed from `sessions` table. Section 11: `orchestrator_tier` config removed; `rating` fields removed from tier config objects. Section 15: rewritten to present open-ended v2 options.
 
 ---
 
