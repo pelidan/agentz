@@ -1,8 +1,18 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
+import { join } from "path";
 import { ORCHESTRATOR_PROMPT, WORKER_BASE_PROMPT } from "./prompts/index";
+import { initDatabase } from "./db/init";
+import { executeDispatch } from "./dispatch/index";
+import { executeQuery } from "./query/index";
 
-const plugin: Plugin = async (_input) => {
+const plugin: Plugin = async (input) => {
+  const directory = input.directory;
+  // TODO: db.close() is never called — add shutdown hook in Phase 6
+  const db = initDatabase(join(directory, ".agentz", "agentz.db"));
+  const skillsDir = join(directory, "skills");
+  const outputBaseDir = join(directory, ".agentz");
+
   // Agent-identity tracking: maps OpenCode session ID → active agent name
   // TODO: Evict entries on session close (Phase 6)
   const sessionAgentMap = new Map<string, string>();
@@ -92,8 +102,21 @@ const plugin: Plugin = async (_input) => {
             ),
         },
         async execute(args, ctx) {
-          // TODO: Implement in Phase 5
-          return `[STUB] Dispatch requested: todo=${args.todo_id}, skill=${args.skill}`;
+          const session = db.getActiveSessionByOpenCodeId(ctx.sessionID);
+          if (!session) {
+            return "No active agentz session.";
+          }
+          const result = await executeDispatch({
+            db,
+            client: (ctx as any).client,
+            sessionId: session.id,
+            todoId: args.todo_id,
+            skill: args.skill,
+            skillsDir,
+            outputBaseDir,
+            metadata: ctx.metadata,
+          });
+          return result.report;
         },
       }),
       agentz_query: tool({
@@ -117,8 +140,15 @@ const plugin: Plugin = async (_input) => {
             ),
         },
         async execute(args, ctx) {
-          // TODO: Implement in Phase 5
-          return `[STUB] Query requested: section=${args.section}`;
+          const session = db.getActiveSessionByOpenCodeId(ctx.sessionID);
+          if (!session) {
+            return "No active agentz session.";
+          }
+          return executeQuery(db, session.id, {
+            section: args.section,
+            taskId: args.task_id,
+            keyword: args.keyword,
+          });
         },
       }),
     },

@@ -95,24 +95,24 @@ describe("plugin entry point", () => {
     expect(hooks["experimental.session.compacting"]).toBeDefined();
   });
 
-  test("agentz_dispatch returns stub response", async () => {
+  test("agentz_dispatch returns error when no session exists", async () => {
     const hooks = await plugin(createMockInput());
     const dispatch = hooks.tool!["agentz_dispatch"];
     const result = await dispatch.execute(
       { todo_id: 1, skill: "backend-developer" } as any,
       createToolContext(),
     );
-    expect(result).toContain("[STUB]");
+    expect(result).toContain("No active agentz session");
   });
 
-  test("agentz_query returns stub response", async () => {
+  test("agentz_query returns error when no session exists", async () => {
     const hooks = await plugin(createMockInput());
     const query = hooks.tool!["agentz_query"];
     const result = await query.execute(
       { section: "todos" } as any,
       createToolContext(),
     );
-    expect(result).toContain("[STUB]");
+    expect(result).toContain("No active agentz session");
   });
 
   test("chat.message hook tracks agent identity", async () => {
