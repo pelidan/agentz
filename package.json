@@ -1,0 +1,21 @@
+{
+  "name": "agentz",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "dev": "bun run --watch src/index.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.2.22",
+    "@opencode-ai/sdk": "^1.2.22"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8"
+  }
+}
