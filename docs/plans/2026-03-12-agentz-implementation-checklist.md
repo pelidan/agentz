@@ -9,7 +9,7 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - [x] Phase 1 - Project Scaffold - `docs/plans/2026-03-12-agentz-phase-01-project-scaffold.md` - Project scaffold (package.json, tsconfig, directories)
 - [x] Phase 2 - Protocol Layer - `docs/plans/2026-03-12-agentz-phase-02-protocol-layer.md` - Protocol layer (types, renderer, parser, validator, context)
 - [x] Phase 3 - Persistence Layer - `docs/plans/2026-03-12-agentz-phase-03-persistence-layer.md` - Persistence layer (SQLite schema, full CRUD for 7 tables)
-- [ ] Phase 4 - Plugin Skeleton - `docs/plans/2026-03-12-agentz-phase-04-plugin-skeleton.md` - Plugin skeleton (config, prompts, entry point with agents/tools/hooks)
+- [x] Phase 4 - Plugin Skeleton - `docs/plans/2026-03-12-agentz-phase-04-plugin-skeleton.md` - Plugin skeleton (config, prompts, entry point with agents/tools/hooks)
 - [ ] Phase 5 - Core Dispatch - `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md` - Core dispatch (skill loader, recommendations, reports, dispatch, query)
 - [ ] Phase 6 - Working View and Hooks - `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md` - Working view and hook implementations
 - [ ] Phase 7 - Skill Files - `docs/plans/2026-03-12-agentz-phase-07-skill-files.md` - All 16 skill files plus loader verification
@@ -59,12 +59,12 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - Plan: `docs/plans/2026-03-12-agentz-phase-04-plugin-skeleton.md`
 - Depends on: Phase 3 complete and committed.
 - Target outcome: Plugin skeleton (config, prompts, entry point with agents/tools/hooks, slash-command stubs)
-- [ ] Task 4.1 - Define tier mapping and configuration types
-- [ ] Task 4.2 - Define orchestrator and worker base prompts
-- [ ] Task 4.3 - Wire up plugin entry point with agent registration and hook stubs
-- [ ] Task 4.4 - Register slash command stubs and verify permission-gated plugin surface
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 4.1 - Define tier mapping and configuration types
+- [x] Task 4.2 - Define orchestrator and worker base prompts
+- [x] Task 4.3 - Wire up plugin entry point with agent registration and hook stubs
+- [x] Task 4.4 - Register slash command stubs and verify permission-gated plugin surface
+- [x] Phase verification complete
+- [x] Phase commits recorded — `b51ab8f`, `36b0897`, `87d607a`, `df93ab3`, `1f7044f`, `0735bb6`, `46ebec5`, `df8969e`, `af2023f`
 
 ### Phase 5 - Core Dispatch
 
