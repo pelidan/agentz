@@ -5,6 +5,8 @@ import { ORCHESTRATOR_PROMPT, WORKER_BASE_PROMPT } from "./prompts/index";
 import { initDatabase } from "./db/init";
 import { executeDispatch } from "./dispatch/index";
 import { executeQuery } from "./query/index";
+import { handleEvent, handleSystemTransform, handleCompacting } from "./hooks/index";
+import type { HookState } from "./hooks/index";
 
 const plugin: Plugin = async (input) => {
   const directory = input.directory;
@@ -16,6 +18,14 @@ const plugin: Plugin = async (input) => {
   // Agent-identity tracking: maps OpenCode session ID → active agent name
   // TODO: Evict entries on session close (Phase 6)
   const sessionAgentMap = new Map<string, string>();
+  const compactedSessions = new Set<string>();
+
+  // Hook lookups via getActiveSessionByOpenCodeId depend on opencode_session_id being
+  // populated on the session row; sessions created without this field will not be found by the hooks
+  const hookState: HookState = { db, sessionAgentMap, compactedSessions };
+
+  // "interrupted" is an intentional task/todo status used by the interruption path —
+  // do not filter or reassign it on resume without deliberate logic
 
   return {
     // === Agent Registrations (via config hook) ===
@@ -155,7 +165,7 @@ const plugin: Plugin = async (input) => {
 
     // === Event Hook ===
     event: async ({ event }) => {
-      // TODO: Implement interruption detection, compaction detection in Phase 5-6
+      handleEvent(hookState, event);
     },
 
     // === Chat Message Hook (agent identity tracking) ===
@@ -167,16 +177,12 @@ const plugin: Plugin = async (input) => {
 
     // === System Transform Hook ===
     "experimental.chat.system.transform": async (input, output) => {
-      // Only inject for the agentz orchestrator agent
-      const activeAgent = sessionAgentMap.get(input.sessionID ?? "");
-      if (activeAgent !== "agentz") return;
-
-      // TODO: Inject working view from DB in Phase 6
+      handleSystemTransform(hookState, input.sessionID, output);
     },
 
     // === Compaction Hook ===
     "experimental.session.compacting": async (input, output) => {
-      // TODO: Inject agentz state into compaction context in Phase 6
+      handleCompacting(hookState, input.sessionID, output);
     },
   };
 };
