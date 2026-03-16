@@ -301,7 +301,7 @@ describe("E2E: full session lifecycle", () => {
 
     // === 6. System prompt composition (verifies skill loading) ===
     const systemPrompt = composeSystemPrompt(
-      "test-skill",
+      "local-explorer",
       {
         sessionId,
         taskId: "task-003",

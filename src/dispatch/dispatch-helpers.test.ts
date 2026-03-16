@@ -14,10 +14,10 @@ describe("composeSystemPrompt", () => {
       priorOutputPaths: [],
       globalNotes: [],
     };
-    const prompt = composeSystemPrompt("test-skill", taskContext, SKILLS_DIR);
+    const prompt = composeSystemPrompt("local-explorer", taskContext, SKILLS_DIR);
     // Protocol layer must appear before skill layer
     const protocolIdx = prompt.indexOf("## Protocol");
-    const skillIdx = prompt.indexOf("# Skill: test-skill");
+    const skillIdx = prompt.indexOf("# Skill: local-explorer");
     const contextIdx = prompt.indexOf("s-001");
     expect(protocolIdx).toBeGreaterThanOrEqual(0);
     expect(skillIdx).toBeGreaterThan(protocolIdx);

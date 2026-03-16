@@ -6,14 +6,14 @@ const SKILLS_DIR = join(import.meta.dir, "../../skills");
 
 describe("skill loader", () => {
   test("loads a skill file by name", () => {
-    const content = loadSkill("test-skill", SKILLS_DIR);
-    expect(content).toContain("# Skill: test-skill");
+    const content = loadSkill("local-explorer", SKILLS_DIR);
+    expect(content).toContain("# Skill: local-explorer");
     expect(content).toContain("## Role");
     expect(content).toContain("## Capabilities");
   });
 
   test("skillExists returns true for existing skill", () => {
-    expect(skillExists("test-skill", SKILLS_DIR)).toBe(true);
+    expect(skillExists("local-explorer", SKILLS_DIR)).toBe(true);
   });
 
   test("skillExists returns false for non-existing skill", () => {
@@ -27,7 +27,7 @@ describe("skill loader", () => {
   });
 
   test("loaded content is trimmed", () => {
-    const content = loadSkill("test-skill", SKILLS_DIR);
+    const content = loadSkill("local-explorer", SKILLS_DIR);
     expect(content).toBe(content.trim());
   });
 });
