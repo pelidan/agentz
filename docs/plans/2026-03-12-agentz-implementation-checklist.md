@@ -13,7 +13,7 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - [x] Phase 5 - Core Dispatch - `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md` - Core dispatch (skill loader, recommendations, reports, dispatch, query)
 - [x] Phase 6 - Working View and Hooks - `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md` - Working view and hook implementations
 - [x] Phase 7 - Skill Files - `docs/plans/2026-03-12-agentz-phase-07-skill-files.md` - All 16 skill files plus loader verification
-- [ ] Phase 8 - End-to-End Integration - `docs/plans/2026-03-12-agentz-phase-08-end-to-end-integration.md` - E2E integration test plus final cleanup
+- [x] Phase 8 - End-to-End Integration - `docs/plans/2026-03-12-agentz-phase-08-end-to-end-integration.md` - E2E integration test plus final cleanup
 
 ## Detailed Checklist
 
@@ -111,7 +111,7 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - Plan: `docs/plans/2026-03-12-agentz-phase-08-end-to-end-integration.md`
 - Depends on: Phase 7 complete and committed.
 - Target outcome: E2E integration test plus final cleanup
-- [ ] Task 8.1 - Write E2E integration test
-- [ ] Task 8.2 - Final verification and cleanup
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 8.1 - Write E2E integration test
+- [x] Task 8.2 - Final verification and cleanup
+- [x] Phase verification complete
+- [x] Phase commits recorded — `63db4f8`, `ed3a785`
