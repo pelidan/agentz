@@ -27,6 +27,18 @@ function createToolContext(overrides?: Record<string, unknown>) {
   } as any;
 }
 
+const ALL_COMMANDS = [
+  "agentz start",
+  "agentz-status",
+  "agentz-resume",
+  "agentz-pause",
+  "agentz-list",
+  "agentz-clean",
+  "agentz-notes",
+  "agentz-notes delete",
+  "agentz-notes edit",
+];
+
 describe("plugin entry point", () => {
   test("plugin is a function", () => {
     expect(typeof plugin).toBe("function");
@@ -118,20 +130,8 @@ describe("plugin entry point", () => {
     const config: Config = {};
     await hooks.config!(config);
 
-    const expectedCommands = [
-      "agentz start",
-      "agentz-status",
-      "agentz-resume",
-      "agentz-pause",
-      "agentz-list",
-      "agentz-clean",
-      "agentz-notes",
-      "agentz-notes delete",
-      "agentz-notes edit",
-    ];
-
     expect(config.command).toBeDefined();
-    for (const cmd of expectedCommands) {
+    for (const cmd of ALL_COMMANDS) {
       expect(config.command![cmd]).toBeDefined();
     }
   });
@@ -158,19 +158,7 @@ describe("plugin entry point", () => {
     await hooks.config!(config);
 
     // These commands are orchestrator-level and should target the agentz agent
-    const orchestratorCommands = [
-      "agentz start",
-      "agentz-status",
-      "agentz-resume",
-      "agentz-pause",
-      "agentz-list",
-      "agentz-clean",
-      "agentz-notes",
-      "agentz-notes delete",
-      "agentz-notes edit",
-    ];
-
-    for (const cmd of orchestratorCommands) {
+    for (const cmd of ALL_COMMANDS) {
       expect(config.command![cmd]!.agent).toBe("agentz");
     }
   });
@@ -184,6 +172,9 @@ describe("plugin entry point", () => {
     expect(agentzAgent.tools).toBeDefined();
     expect(agentzAgent.tools!["agentz_dispatch"]).toBe(true);
     expect(agentzAgent.tools!["agentz_query"]).toBe(true);
+
+    // Worker should NOT have tool access
+    expect(config.agent!["agentz-worker"]!.tools).toBeUndefined();
   });
 
   test("config hook preserves existing commands", async () => {
