@@ -6,9 +6,9 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 
 ## Phase Sequence
 
-- [ ] Phase 1 - Project Scaffold - `docs/plans/2026-03-12-agentz-phase-01-project-scaffold.md` - Project scaffold (package.json, tsconfig, directories)
-- [ ] Phase 2 - Protocol Layer - `docs/plans/2026-03-12-agentz-phase-02-protocol-layer.md` - Protocol layer (types, renderer, parser, validator, context)
-- [ ] Phase 3 - Persistence Layer - `docs/plans/2026-03-12-agentz-phase-03-persistence-layer.md` - Persistence layer (SQLite schema, full CRUD for 7 tables)
+- [x] Phase 1 - Project Scaffold - `docs/plans/2026-03-12-agentz-phase-01-project-scaffold.md` - Project scaffold (package.json, tsconfig, directories)
+- [x] Phase 2 - Protocol Layer - `docs/plans/2026-03-12-agentz-phase-02-protocol-layer.md` - Protocol layer (types, renderer, parser, validator, context)
+- [x] Phase 3 - Persistence Layer - `docs/plans/2026-03-12-agentz-phase-03-persistence-layer.md` - Persistence layer (SQLite schema, full CRUD for 7 tables)
 - [ ] Phase 4 - Plugin Skeleton - `docs/plans/2026-03-12-agentz-phase-04-plugin-skeleton.md` - Plugin skeleton (config, prompts, entry point with agents/tools/hooks)
 - [ ] Phase 5 - Core Dispatch - `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md` - Core dispatch (skill loader, recommendations, reports, dispatch, query)
 - [ ] Phase 6 - Working View and Hooks - `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md` - Working view and hook implementations
@@ -22,37 +22,37 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - Plan: `docs/plans/2026-03-12-agentz-phase-01-project-scaffold.md`
 - Depends on: None. This is the starting phase.
 - Target outcome: Project scaffold (package.json, tsconfig, directories)
-- [ ] Task 1.1 - Initialize package.json and install dependencies
-- [ ] Task 1.2 - Create directory structure and entry point stub
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 1.1 - Initialize package.json and install dependencies
+- [x] Task 1.2 - Create directory structure and entry point stub
+- [x] Phase verification complete
+- [x] Phase commits recorded — `09feb24`, `d9d06eb`
 
 ### Phase 2 - Protocol Layer
 
 - Plan: `docs/plans/2026-03-12-agentz-phase-02-protocol-layer.md`
 - Depends on: Phase 1 complete and committed.
 - Target outcome: Protocol layer (types, renderer, parser, validator, context)
-- [ ] Task 2.1 - Define core protocol types
-- [ ] Task 2.2 - Implement protocol renderer
-- [ ] Task 2.3 - Implement completion report parser
-- [ ] Task 2.4 - Implement output validator
-- [ ] Task 2.5 - Implement task context renderer
-- [ ] Task 2.6 - Run full protocol test suite
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 2.1 - Define core protocol types
+- [x] Task 2.2 - Implement protocol renderer
+- [x] Task 2.3 - Implement completion report parser
+- [x] Task 2.4 - Implement output validator
+- [x] Task 2.5 - Implement task context renderer
+- [x] Task 2.6 - Run full protocol test suite
+- [x] Phase verification complete
+- [x] Phase commits recorded — `9efe9bd`, `ea7ec26`, `10e782d`, `464f105`, `7979c22`, `9f5d7fe`, `a7a21f1`
 
 ### Phase 3 - Persistence Layer
 
 - Plan: `docs/plans/2026-03-12-agentz-phase-03-persistence-layer.md`
 - Depends on: Phase 2 complete and committed.
 - Target outcome: Persistence layer (SQLite schema, full CRUD for 7 tables)
-- [ ] Task 3.1 - Define database schema and initialization
-- [ ] Task 3.2 - Implement database client — session and todo CRUD
-- [ ] Task 3.3 - Add task, iteration, note, review_item, and global_note CRUD
-- [ ] Task 3.4 - Add database initialization helper
-- [ ] Task 3.5 - Run full database test suite
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 3.1 - Define database schema and initialization
+- [x] Task 3.2 - Implement database client — session and todo CRUD
+- [x] Task 3.3 - Add task, iteration, note, review_item, and global_note CRUD
+- [x] Task 3.4 - Add database initialization helper
+- [x] Task 3.5 - Run full database test suite
+- [x] Phase verification complete
+- [x] Phase commits recorded — `1de5324`, `969a5d5`, `6465b83`, `2984228`
 
 ### Phase 4 - Plugin Skeleton
 
