@@ -244,4 +244,355 @@ export class AgentzDB {
         .get({ $sessionId: sessionId }) as TodoRow | null) ?? null
     );
   }
+
+  // === Tasks ===
+
+  createTask(params: {
+    id: string;
+    sessionId: string;
+    todoId: number;
+    skill: string;
+    tier: string;
+    inputSummary?: string;
+    iteration: number;
+  }): TaskRow {
+    this.db
+      .query(
+        `INSERT INTO tasks (id, session_id, todo_id, skill, tier, input_summary, iteration)
+         VALUES ($id, $sessionId, $todoId, $skill, $tier, $inputSummary, $iteration)`
+      )
+      .run({
+        $id: params.id,
+        $sessionId: params.sessionId,
+        $todoId: params.todoId,
+        $skill: params.skill,
+        $tier: params.tier,
+        $inputSummary: params.inputSummary ?? null,
+        $iteration: params.iteration,
+      });
+    return this.getTask(params.id)!;
+  }
+
+  getTask(id: string): TaskRow | null {
+    return (
+      (this.db
+        .query("SELECT * FROM tasks WHERE id = $id")
+        .get({ $id: id }) as TaskRow | null) ?? null
+    );
+  }
+
+  updateTaskStatus(id: string, status: string): void {
+    this.db
+      .query("UPDATE tasks SET status = $status WHERE id = $id")
+      .run({ $id: id, $status: status });
+  }
+
+  completeTask(
+    id: string,
+    params: {
+      outputSummary: string;
+      outputPath: string;
+      finalTier: string;
+      recommendations?: string;
+      needsReviewCount?: number;
+    }
+  ): void {
+    this.db
+      .query(
+        `UPDATE tasks SET
+           status = 'completed',
+           output_summary = $outputSummary,
+           output_path = $outputPath,
+           final_tier = $finalTier,
+           recommendations = $recommendations,
+           needs_review_count = $needsReviewCount,
+           completed_at = datetime('now')
+         WHERE id = $id`
+      )
+      .run({
+        $id: id,
+        $outputSummary: params.outputSummary,
+        $outputPath: params.outputPath,
+        $finalTier: params.finalTier,
+        $recommendations: params.recommendations ?? null,
+        $needsReviewCount: params.needsReviewCount ?? 0,
+      });
+  }
+
+  failTask(
+    id: string,
+    params: {
+      failureClassification: string;
+      errorDetail: string;
+      retries: number;
+      finalTier: string;
+    }
+  ): void {
+    this.db
+      .query(
+        `UPDATE tasks SET
+           status = 'failed',
+           failure_classification = $failureClassification,
+           error_detail = $errorDetail,
+           retries = $retries,
+           final_tier = $finalTier,
+           completed_at = datetime('now')
+         WHERE id = $id`
+      )
+      .run({
+        $id: id,
+        $failureClassification: params.failureClassification,
+        $errorDetail: params.errorDetail,
+        $retries: params.retries,
+        $finalTier: params.finalTier,
+      });
+  }
+
+  getRunningTask(sessionId: string): TaskRow | null {
+    return (
+      (this.db
+        .query(
+          "SELECT * FROM tasks WHERE session_id = $sessionId AND status = 'running' LIMIT 1"
+        )
+        .get({ $sessionId: sessionId }) as TaskRow | null) ?? null
+    );
+  }
+
+  getTasksBySession(sessionId: string): TaskRow[] {
+    return this.db
+      .query(
+        "SELECT * FROM tasks WHERE session_id = $sessionId ORDER BY created_at ASC"
+      )
+      .all({ $sessionId: sessionId }) as TaskRow[];
+  }
+
+  getNextTaskId(sessionId: string): string {
+    const count = this.db
+      .query(
+        "SELECT COUNT(*) as count FROM tasks WHERE session_id = $sessionId"
+      )
+      .get({ $sessionId: sessionId }) as { count: number };
+    return `task-${String(count.count + 1).padStart(3, "0")}`;
+  }
+
+  // === Iterations ===
+
+  addIteration(params: {
+    sessionId: string;
+    iterationNumber: number;
+    summary: string;
+    decisions?: string;
+  }): IterationRow {
+    const result = this.db
+      .query(
+        `INSERT INTO iterations (session_id, iteration_number, summary, decisions)
+         VALUES ($sessionId, $iterationNumber, $summary, $decisions)`
+      )
+      .run({
+        $sessionId: params.sessionId,
+        $iterationNumber: params.iterationNumber,
+        $summary: params.summary,
+        $decisions: params.decisions ?? null,
+      });
+    return this.db
+      .query("SELECT * FROM iterations WHERE id = $id")
+      .get({ $id: result.lastInsertRowid }) as IterationRow;
+  }
+
+  getIterations(sessionId: string): IterationRow[] {
+    return this.db
+      .query(
+        "SELECT * FROM iterations WHERE session_id = $sessionId ORDER BY iteration_number ASC"
+      )
+      .all({ $sessionId: sessionId }) as IterationRow[];
+  }
+
+  getLatestIterations(sessionId: string, limit: number): IterationRow[] {
+    return this.db
+      .query(
+        `SELECT * FROM iterations WHERE session_id = $sessionId
+         ORDER BY iteration_number DESC LIMIT $limit`
+      )
+      .all({ $sessionId: sessionId, $limit: limit })
+      .reverse() as IterationRow[];
+  }
+
+  // === Notes ===
+
+  addNote(params: {
+    sessionId: string;
+    content: string;
+    addedBy?: string;
+  }): NoteRow {
+    const result = this.db
+      .query(
+        `INSERT INTO notes (session_id, content, added_by)
+         VALUES ($sessionId, $content, $addedBy)`
+      )
+      .run({
+        $sessionId: params.sessionId,
+        $content: params.content,
+        $addedBy: params.addedBy ?? null,
+      });
+    return this.db
+      .query("SELECT * FROM notes WHERE id = $id")
+      .get({ $id: result.lastInsertRowid }) as NoteRow;
+  }
+
+  getNotes(sessionId: string, keyword?: string): NoteRow[] {
+    if (keyword) {
+      return this.db
+        .query(
+          "SELECT * FROM notes WHERE session_id = $sessionId AND content LIKE $keyword ORDER BY created_at ASC"
+        )
+        .all({
+          $sessionId: sessionId,
+          $keyword: `%${keyword}%`,
+        }) as NoteRow[];
+    }
+    return this.db
+      .query(
+        "SELECT * FROM notes WHERE session_id = $sessionId ORDER BY created_at ASC"
+      )
+      .all({ $sessionId: sessionId }) as NoteRow[];
+  }
+
+  // === Review Items ===
+
+  addReviewItem(params: {
+    taskId: string;
+    sessionId: string;
+    content: string;
+  }): ReviewItemRow {
+    const result = this.db
+      .query(
+        `INSERT INTO review_items (task_id, session_id, content)
+         VALUES ($taskId, $sessionId, $content)`
+      )
+      .run({
+        $taskId: params.taskId,
+        $sessionId: params.sessionId,
+        $content: params.content,
+      });
+    return this.db
+      .query("SELECT * FROM review_items WHERE id = $id")
+      .get({ $id: result.lastInsertRowid }) as ReviewItemRow;
+  }
+
+  getUnsurfacedReviewItems(sessionId: string): ReviewItemRow[] {
+    return this.db
+      .query(
+        "SELECT * FROM review_items WHERE session_id = $sessionId AND surfaced = 0 ORDER BY created_at ASC"
+      )
+      .all({ $sessionId: sessionId }) as ReviewItemRow[];
+  }
+
+  markReviewItemSurfaced(id: number): void {
+    this.db
+      .query("UPDATE review_items SET surfaced = 1 WHERE id = $id")
+      .run({ $id: id });
+  }
+
+  getReviewItemCount(sessionId: string): number {
+    const result = this.db
+      .query(
+        "SELECT COUNT(*) as count FROM review_items WHERE session_id = $sessionId AND surfaced = 0"
+      )
+      .get({ $sessionId: sessionId }) as { count: number };
+    return result.count;
+  }
+
+  // === Global Notes ===
+
+  addGlobalNote(params: {
+    content: string;
+    category?: string;
+    sourceSessionId?: string;
+    sourceTaskId?: string;
+  }): GlobalNoteRow {
+    const result = this.db
+      .query(
+        `INSERT INTO global_notes (content, category, source_session_id, source_task_id)
+         VALUES ($content, $category, $sourceSessionId, $sourceTaskId)`
+      )
+      .run({
+        $content: params.content,
+        $category: params.category ?? null,
+        $sourceSessionId: params.sourceSessionId ?? null,
+        $sourceTaskId: params.sourceTaskId ?? null,
+      });
+    return this.db
+      .query("SELECT * FROM global_notes WHERE id = $id")
+      .get({ $id: result.lastInsertRowid }) as GlobalNoteRow;
+  }
+
+  getGlobalNotes(keyword?: string): GlobalNoteRow[] {
+    if (keyword) {
+      return this.db
+        .query(
+          "SELECT * FROM global_notes WHERE content LIKE $keyword ORDER BY created_at ASC"
+        )
+        .all({ $keyword: `%${keyword}%` }) as GlobalNoteRow[];
+    }
+    return this.db
+      .query("SELECT * FROM global_notes ORDER BY created_at ASC")
+      .all() as GlobalNoteRow[];
+  }
+
+  getConfirmedGlobalNotes(): GlobalNoteRow[] {
+    return this.db
+      .query(
+        "SELECT * FROM global_notes WHERE status = 'confirmed' ORDER BY confirmed_count DESC"
+      )
+      .all() as GlobalNoteRow[];
+  }
+
+  updateGlobalNoteStatus(id: number, status: string): void {
+    this.db
+      .query(
+        "UPDATE global_notes SET status = $status, updated_at = datetime('now') WHERE id = $id"
+      )
+      .run({ $id: id, $status: status });
+  }
+
+  confirmGlobalNote(id: number): void {
+    this.db
+      .query(
+        `UPDATE global_notes SET
+           status = 'confirmed',
+           last_confirmed = datetime('now'),
+           confirmed_count = confirmed_count + 1,
+           updated_at = datetime('now')
+         WHERE id = $id`
+      )
+      .run({ $id: id });
+  }
+
+  supersedeGlobalNote(oldId: number, newId: number): void {
+    this.db
+      .query(
+        "UPDATE global_notes SET status = 'superseded', superseded_by = $newId, updated_at = datetime('now') WHERE id = $oldId"
+      )
+      .run({ $oldId: oldId, $newId: newId });
+  }
+
+  /**
+   * Returns confirmed global notes suitable for prompt injection.
+   * Notes not reconfirmed for 5+ sessions have "[stale] " prefix.
+   *
+   * NOTE: Staleness tracking requires session counting infrastructure not yet built.
+   * For v1, returns all confirmed notes without stale annotation.
+   */
+  getConfirmedGlobalNotesForInjection(): Array<
+    GlobalNoteRow & { content: string }
+  > {
+    const confirmed = this.db
+      .query(
+        "SELECT * FROM global_notes WHERE status = 'confirmed' ORDER BY confirmed_count DESC"
+      )
+      .all() as GlobalNoteRow[];
+    // For v1: return all confirmed notes without stale annotation.
+    // Staleness tracking requires session counting infrastructure not yet built.
+    return confirmed.map((note) => ({ ...note }));
+  }
 }
