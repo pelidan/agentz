@@ -68,14 +68,14 @@ export function validateCompletionReport(raw: string): ValidationResult {
     errors.push({ field: "outputPath", error: "OUTPUT path is empty" });
   } else {
     // 4. Output file exists on disk
-    if (!existsSync(fields.outputPath)) {
+    if (!existsSync(outputPathRaw)) {
       errors.push({
         field: "outputFile",
-        error: `Output file does not exist: ${fields.outputPath}`,
+        error: `Output file does not exist: ${outputPathRaw}`,
       });
     } else {
       // 5-8. Validate output file structure
-      const content = readFileSync(fields.outputPath, "utf-8");
+      const content = readFileSync(outputPathRaw, "utf-8");
       const outputResult = parseOutputFile(content);
       if (!outputResult.valid) {
         for (const err of outputResult.errors) {
