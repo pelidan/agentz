@@ -12,7 +12,7 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - [x] Phase 4 - Plugin Skeleton - `docs/plans/2026-03-12-agentz-phase-04-plugin-skeleton.md` - Plugin skeleton (config, prompts, entry point with agents/tools/hooks)
 - [x] Phase 5 - Core Dispatch - `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md` - Core dispatch (skill loader, recommendations, reports, dispatch, query)
 - [x] Phase 6 - Working View and Hooks - `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md` - Working view and hook implementations
-- [ ] Phase 7 - Skill Files - `docs/plans/2026-03-12-agentz-phase-07-skill-files.md` - All 16 skill files plus loader verification
+- [x] Phase 7 - Skill Files - `docs/plans/2026-03-12-agentz-phase-07-skill-files.md` - All 16 skill files plus loader verification
 - [ ] Phase 8 - End-to-End Integration - `docs/plans/2026-03-12-agentz-phase-08-end-to-end-integration.md` - E2E integration test plus final cleanup
 
 ## Detailed Checklist
@@ -97,14 +97,14 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - Plan: `docs/plans/2026-03-12-agentz-phase-07-skill-files.md`
 - Depends on: Phase 6 complete and committed.
 - Target outcome: All 16 skill files plus loader verification
-- [ ] Task 7.1 - Write core skill files (triage-analyst, local-explorer, backend-developer)
-- [ ] Task 7.2 - Write remaining leaf and analysis skills
-- [ ] Task 7.3 - Write developer and tester skills
-- [ ] Task 7.4 - Write review, infrastructure, and documentation skills
-- [ ] Task 7.5 - Write synthesizer skill
-- [ ] Task 7.6 - Verify all skill files load correctly
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 7.1 - Write core skill files (triage-analyst, local-explorer, backend-developer)
+- [x] Task 7.2 - Write remaining leaf and analysis skills
+- [x] Task 7.3 - Write developer and tester skills
+- [x] Task 7.4 - Write review, infrastructure, and documentation skills
+- [x] Task 7.5 - Write synthesizer skill
+- [x] Task 7.6 - Verify all skill files load correctly
+- [x] Phase verification complete
+- [x] Phase commits recorded — `11f863c`, `f237a68`, `466cbcb`, `5ac5f0b`, `5c858d9`, `4cfee64`
 
 ### Phase 8 - End-to-End Integration
 
