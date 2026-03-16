@@ -2,14 +2,10 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { ORCHESTRATOR_PROMPT, WORKER_BASE_PROMPT } from "./prompts/index";
 
-const plugin: Plugin = async (input) => {
-  const { client, directory } = input;
-
+const plugin: Plugin = async (_input) => {
   // Agent-identity tracking: maps OpenCode session ID → active agent name
+  // TODO: Evict entries on session close (Phase 6)
   const sessionAgentMap = new Map<string, string>();
-
-  // Track sessions that were compacted (for post-compaction hardening)
-  const compactedSessions = new Set<string>();
 
   return {
     // === Agent Registrations (via config hook) ===
