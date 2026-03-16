@@ -10,7 +10,7 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - [x] Phase 2 - Protocol Layer - `docs/plans/2026-03-12-agentz-phase-02-protocol-layer.md` - Protocol layer (types, renderer, parser, validator, context)
 - [x] Phase 3 - Persistence Layer - `docs/plans/2026-03-12-agentz-phase-03-persistence-layer.md` - Persistence layer (SQLite schema, full CRUD for 7 tables)
 - [x] Phase 4 - Plugin Skeleton - `docs/plans/2026-03-12-agentz-phase-04-plugin-skeleton.md` - Plugin skeleton (config, prompts, entry point with agents/tools/hooks)
-- [ ] Phase 5 - Core Dispatch - `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md` - Core dispatch (skill loader, recommendations, reports, dispatch, query)
+- [x] Phase 5 - Core Dispatch - `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md` - Core dispatch (skill loader, recommendations, reports, dispatch, query)
 - [ ] Phase 6 - Working View and Hooks - `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md` - Working view and hook implementations
 - [ ] Phase 7 - Skill Files - `docs/plans/2026-03-12-agentz-phase-07-skill-files.md` - All 16 skill files plus loader verification
 - [ ] Phase 8 - End-to-End Integration - `docs/plans/2026-03-12-agentz-phase-08-end-to-end-integration.md` - E2E integration test plus final cleanup
@@ -71,15 +71,15 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - Plan: `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md`
 - Depends on: Phase 4 complete and committed.
 - Target outcome: Core dispatch (skill loader, recommendations, reports, dispatch, query)
-- [ ] Task 5.1 - Implement skill file loader
-- [ ] Task 5.2 - Implement recommendation processor
-- [ ] Task 5.3 - Implement structured report formatters
-- [ ] Task 5.4 - Implement the agentz_dispatch execute function
-- [ ] Task 5.5 - Implement the agentz_query execute function
-- [ ] Task 5.6 - Wire dispatch and query into plugin entry point
-- [ ] Task 5.7 - Run dispatch and query verification (full test suite and typecheck)
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 5.1 - Implement skill file loader
+- [x] Task 5.2 - Implement recommendation processor
+- [x] Task 5.3 - Implement structured report formatters
+- [x] Task 5.4 - Implement the agentz_dispatch execute function
+- [x] Task 5.5 - Implement the agentz_query execute function
+- [x] Task 5.6 - Wire dispatch and query into plugin entry point
+- [x] Task 5.7 - Run dispatch and query verification (full test suite and typecheck)
+- [x] Phase verification complete
+- [x] Phase commits recorded — `580b9a3`, `6ec81ee`, `8e985b7`, `5b3ee5e`, `026b412`, `9587948`
 
 ### Phase 6 - Working View and Hooks
 
