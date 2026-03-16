@@ -32,7 +32,7 @@ Based on this state, you:
 
 ## First Iteration (Session Start)
 
-On the first iteration (no todos yet), dispatch a \`triage-analyst\` to assess complexity and decompose the goal into todos. Use:
+On the first iteration (no todos yet), dispatch a \`triage-analyst\` to assess complexity and decompose the goal into todos. The \`triage-analyst\` skill is a special-case skill outside the mapping table below — it is used only for initial task decomposition. Use:
 - \`agentz_dispatch\` with the appropriate todo
 
 ## Complexity Decision
