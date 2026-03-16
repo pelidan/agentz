@@ -112,4 +112,92 @@ describe("plugin entry point", () => {
       { message: {} as any, parts: [] },
     );
   });
+
+  test("config hook registers all slash commands", async () => {
+    const hooks = await plugin(createMockInput());
+    const config: Config = {};
+    await hooks.config!(config);
+
+    const expectedCommands = [
+      "agentz start",
+      "agentz-status",
+      "agentz-resume",
+      "agentz-pause",
+      "agentz-list",
+      "agentz-clean",
+      "agentz-notes",
+      "agentz-notes delete",
+      "agentz-notes edit",
+    ];
+
+    expect(config.command).toBeDefined();
+    for (const cmd of expectedCommands) {
+      expect(config.command![cmd]).toBeDefined();
+    }
+  });
+
+  test("each slash command has description and stub template", async () => {
+    const hooks = await plugin(createMockInput());
+    const config: Config = {};
+    await hooks.config!(config);
+
+    const commands = Object.entries(config.command!);
+    expect(commands.length).toBeGreaterThanOrEqual(9);
+
+    for (const [name, cmd] of commands) {
+      expect(cmd.description).toBeDefined();
+      expect(cmd.description!.length).toBeGreaterThan(0);
+      expect(cmd.template).toBeDefined();
+      expect(cmd.template).toContain("[STUB]");
+    }
+  });
+
+  test("orchestrator commands set agent to agentz", async () => {
+    const hooks = await plugin(createMockInput());
+    const config: Config = {};
+    await hooks.config!(config);
+
+    // These commands are orchestrator-level and should target the agentz agent
+    const orchestratorCommands = [
+      "agentz start",
+      "agentz-status",
+      "agentz-resume",
+      "agentz-pause",
+      "agentz-list",
+      "agentz-clean",
+      "agentz-notes",
+      "agentz-notes delete",
+      "agentz-notes edit",
+    ];
+
+    for (const cmd of orchestratorCommands) {
+      expect(config.command![cmd]!.agent).toBe("agentz");
+    }
+  });
+
+  test("agentz agent has permission-gated tools", async () => {
+    const hooks = await plugin(createMockInput());
+    const config: Config = {};
+    await hooks.config!(config);
+
+    const agentzAgent = config.agent!["agentz"]!;
+    expect(agentzAgent.tools).toBeDefined();
+    expect(agentzAgent.tools!["agentz_dispatch"]).toBe(true);
+    expect(agentzAgent.tools!["agentz_query"]).toBe(true);
+  });
+
+  test("config hook preserves existing commands", async () => {
+    const hooks = await plugin(createMockInput());
+    const config: Config = {
+      command: {
+        "existing-cmd": { template: "existing command", description: "pre-existing" },
+      },
+    };
+    await hooks.config!(config);
+
+    // Existing command preserved
+    expect(config.command!["existing-cmd"]!.template).toBe("existing command");
+    // New commands added
+    expect(config.command!["agentz start"]).toBeDefined();
+  });
 });

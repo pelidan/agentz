@@ -10,16 +10,69 @@ const plugin: Plugin = async (_input) => {
   return {
     // === Agent Registrations (via config hook) ===
     config: async (config) => {
+      // --- Agent registrations ---
       config.agent = config.agent ?? {};
       config.agent["agentz"] = {
         prompt: ORCHESTRATOR_PROMPT,
         description: "Agentz orchestrator — multi-agent task orchestration",
         mode: "primary",
+        tools: {
+          agentz_dispatch: true,
+          agentz_query: true,
+        },
       };
       config.agent["agentz-worker"] = {
         prompt: WORKER_BASE_PROMPT,
         description: "Agentz skill-specialized worker subagent",
         mode: "subagent",
+      };
+
+      // --- Slash command registrations (stubs) ---
+      config.command = config.command ?? {};
+      config.command["agentz start"] = {
+        template: "[STUB] Start orchestration for a new task",
+        description: "Begin multi-agent orchestration for a task",
+        agent: "agentz",
+      };
+      config.command["agentz-status"] = {
+        template: "[STUB] Show current orchestration status",
+        description: "Display status of the current orchestration session",
+        agent: "agentz",
+      };
+      config.command["agentz-resume"] = {
+        template: "[STUB] Resume a paused orchestration",
+        description: "Resume a previously paused orchestration session",
+        agent: "agentz",
+      };
+      config.command["agentz-pause"] = {
+        template: "[STUB] Pause the current orchestration",
+        description: "Pause the active orchestration session",
+        agent: "agentz",
+      };
+      config.command["agentz-list"] = {
+        template: "[STUB] List all orchestration sessions",
+        description: "List all tracked orchestration sessions",
+        agent: "agentz",
+      };
+      config.command["agentz-clean"] = {
+        template: "[STUB] Clean up completed orchestration sessions",
+        description: "Remove completed or stale orchestration data",
+        agent: "agentz",
+      };
+      config.command["agentz-notes"] = {
+        template: "[STUB] Show orchestration notes",
+        description: "Display notes for the current orchestration",
+        agent: "agentz",
+      };
+      config.command["agentz-notes delete"] = {
+        template: "[STUB] Delete an orchestration note",
+        description: "Delete a specific orchestration note",
+        agent: "agentz",
+      };
+      config.command["agentz-notes edit"] = {
+        template: "[STUB] Edit an orchestration note",
+        description: "Edit an existing orchestration note",
+        agent: "agentz",
       };
     },
 
