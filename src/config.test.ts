@@ -19,19 +19,21 @@ describe("tier configuration", () => {
   });
 
   test("each tier has model and escalate_to", () => {
-    for (const [name, tier] of Object.entries(DEFAULT_TIER_CONFIG)) {
+    for (const [, tier] of Object.entries(DEFAULT_TIER_CONFIG)) {
       expect(tier.model).toBeDefined();
       expect("escalate_to" in tier).toBe(true);
     }
   });
 
-  test("escalation chain is finite", () => {
-    let tier = DEFAULT_TIER_CONFIG["fast-cheap"];
-    const visited = new Set<string>();
-    while (tier.escalate_to) {
-      expect(visited.has(tier.escalate_to)).toBe(false); // no cycles
-      visited.add(tier.escalate_to);
-      tier = DEFAULT_TIER_CONFIG[tier.escalate_to];
+  test("escalation chain is finite (no cycles from any tier)", () => {
+    for (const startName of Object.keys(DEFAULT_TIER_CONFIG)) {
+      let tier = DEFAULT_TIER_CONFIG[startName];
+      const visited = new Set<string>([startName]);
+      while (tier.escalate_to) {
+        expect(visited.has(tier.escalate_to)).toBe(false); // no cycles
+        visited.add(tier.escalate_to);
+        tier = DEFAULT_TIER_CONFIG[tier.escalate_to];
+      }
     }
   });
 });
@@ -42,7 +44,7 @@ describe("category mapping", () => {
   });
 
   test("each category has tier and skill", () => {
-    for (const [name, mapping] of Object.entries(CATEGORY_MAPPING)) {
+    for (const [, mapping] of Object.entries(CATEGORY_MAPPING)) {
       expect(mapping.tier).toBeDefined();
       expect(mapping.skill).toBeDefined();
       expect(DEFAULT_TIER_CONFIG[mapping.tier]).toBeDefined();
