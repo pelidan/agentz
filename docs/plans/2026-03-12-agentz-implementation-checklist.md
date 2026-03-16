@@ -11,7 +11,7 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - [x] Phase 3 - Persistence Layer - `docs/plans/2026-03-12-agentz-phase-03-persistence-layer.md` - Persistence layer (SQLite schema, full CRUD for 7 tables)
 - [x] Phase 4 - Plugin Skeleton - `docs/plans/2026-03-12-agentz-phase-04-plugin-skeleton.md` - Plugin skeleton (config, prompts, entry point with agents/tools/hooks)
 - [x] Phase 5 - Core Dispatch - `docs/plans/2026-03-12-agentz-phase-05-core-dispatch.md` - Core dispatch (skill loader, recommendations, reports, dispatch, query)
-- [ ] Phase 6 - Working View and Hooks - `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md` - Working view and hook implementations
+- [x] Phase 6 - Working View and Hooks - `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md` - Working view and hook implementations
 - [ ] Phase 7 - Skill Files - `docs/plans/2026-03-12-agentz-phase-07-skill-files.md` - All 16 skill files plus loader verification
 - [ ] Phase 8 - End-to-End Integration - `docs/plans/2026-03-12-agentz-phase-08-end-to-end-integration.md` - E2E integration test plus final cleanup
 
@@ -86,11 +86,11 @@ Use this document to track gradual implementation of the Agentz phase plans. Wor
 - Plan: `docs/plans/2026-03-12-agentz-phase-06-working-view-and-hooks.md`
 - Depends on: Phase 5 complete and committed.
 - Target outcome: Working view and hook implementations
-- [ ] Task 6.1 - Implement buildWorkingView
-- [ ] Task 6.2 - Implement event and compaction hooks
-- [ ] Task 6.3 - Run full test suite for Phases 5-6
-- [ ] Phase verification complete
-- [ ] Phase commits recorded
+- [x] Task 6.1 - Implement buildWorkingView
+- [x] Task 6.2 - Implement event and compaction hooks
+- [x] Task 6.3 - Run full test suite for Phases 5-6
+- [x] Phase verification complete
+- [x] Phase commits recorded — `1926a5b`, `bb164ee`
 
 ### Phase 7 - Skill Files
 
